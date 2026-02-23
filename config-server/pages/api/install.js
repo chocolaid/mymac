@@ -1,9 +1,12 @@
 // GET /api/install?token=<ADMIN_TOKEN>
-// Generates install.sh on-the-fly with asset IDs and GH_TOKEN pre-baked.
-// Asset IDs are resolved server-side so the Mac needs no JSON parsing.
+// Generates install.sh on-the-fly. Checks GitHub repo visibility server-side:
+//   - Public repo  → direct releases/download/ URLs, no token in script
+//   - Private repo → assets API + GH_TOKEN baked in, asset IDs resolved server-side
 // Usage: curl -fsSL "https://mymac-config.vercel.app/api/install?token=Punisher2004@aA" | sudo bash
 
 const https = require('https');
+const REPO   = 'chocolaid/mymac';
+const TAG    = 'v2.0.2';
 
 function ghGet(path, ghToken) {
   return new Promise((resolve, reject) => {
@@ -21,7 +24,7 @@ function ghGet(path, ghToken) {
       res.on('data', d => body += d);
       res.on('end', () => {
         try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
-        catch(e) { reject(e); }
+        catch (e) { reject(new Error('JSON parse error: ' + e.message)); }
       });
     });
     req.on('error', reject);
@@ -38,86 +41,155 @@ export default async function handler(req, res) {
   const ghToken = process.env.GH_TOKEN || '';
   if (!ghToken) return res.status(503).json({ error: 'GH_TOKEN not configured' });
 
-  // Resolve asset IDs server-side — bake numeric IDs directly into the bash script
-  let arm64Id, amd64Id, checksumId;
+  // ── Check repo visibility ─────────────────────────────────────────────────────
+  let isPrivate;
   try {
-    const { status, body } = await ghGet('/repos/chocolaid/mymac/releases/tags/v2.0.2', ghToken);
-    if (status !== 200) return res.status(502).json({ error: 'GitHub API returned ' + status });
-    const assets = body.assets || [];
-    arm64Id    = assets.find(a => a.name === 'agent-darwin-arm64')?.id;
-    amd64Id    = assets.find(a => a.name === 'agent-darwin-amd64')?.id;
-    checksumId = assets.find(a => a.name === 'checksums.txt')?.id;
-    if (!arm64Id || !amd64Id) return res.status(502).json({ error: 'Release assets missing from v2.0.2' });
+    const { status, body } = await ghGet(`/repos/${REPO}`, ghToken);
+    if (status !== 200) return res.status(502).json({ error: `GitHub repo check returned ${status}` });
+    isPrivate = body.private === true;
   } catch (e) {
-    return res.status(502).json({ error: 'GitHub fetch failed: ' + e.message });
+    return res.status(502).json({ error: 'GitHub repo check failed: ' + e.message });
+  }
+
+  let script;
+
+  if (!isPrivate) {
+    // ── PUBLIC REPO: simple direct URLs, no token needed ─────────────────────────
+    const base = `https://github.com/${REPO}/releases/download/${TAG}`;
+    script = buildPublicScript(base);
+  } else {
+    // ── PRIVATE REPO: resolve asset IDs server-side, bake GH_TOKEN ───────────────
+    let arm64Id, amd64Id, checksumId;
+    try {
+      const { status, body } = await ghGet(`/repos/${REPO}/releases/tags/${TAG}`, ghToken);
+      if (status !== 200) return res.status(502).json({ error: `GitHub releases API returned ${status}` });
+      const assets = body.assets || [];
+      arm64Id    = assets.find(a => a.name === 'agent-darwin-arm64')?.id;
+      amd64Id    = assets.find(a => a.name === 'agent-darwin-amd64')?.id;
+      checksumId = assets.find(a => a.name === 'checksums.txt')?.id;
+      if (!arm64Id || !amd64Id) return res.status(502).json({ error: 'Release assets missing from ' + TAG });
+    } catch (e) {
+      return res.status(502).json({ error: 'GitHub fetch failed: ' + e.message });
+    }
+    script = buildPrivateScript(ghToken, arm64Id, amd64Id, checksumId);
   }
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  res.status(200).send(buildScript(ghToken, arm64Id, amd64Id, checksumId));
+  res.status(200).send(script);
 }
 
-function buildScript(ghToken, arm64Id, amd64Id, checksumId) {
+// ── Shared header lines ────────────────────────────────────────────────────────
+function scriptHeader() {
   return [
     '#!/usr/bin/env bash',
     '# install.sh – mymac agent installer (auto-generated, no prompts)',
     '# ─────────────────────────────────────────────────────────────────────────────',
-    "set -euo pipefail",
-    "",
+    'set -euo pipefail',
+    '',
     "RED='\\033[0;31m'; GREEN='\\033[0;32m'; YELLOW='\\033[1;33m'",
     "CYAN='\\033[0;36m'; BOLD='\\033[1m'; RESET='\\033[0m'",
     "info()    { echo -e \"${CYAN}[•]${RESET} $*\"; }",
     "success() { echo -e \"${GREEN}[✓]${RESET} $*\"; }",
     "warn()    { echo -e \"${YELLOW}[!]${RESET} $*\"; }",
     "die()     { echo -e \"${RED}[✗]${RESET} $*\" >&2; exit 1; }",
-    "",
-    "# ── Guards ────────────────────────────────────────────────────────────────────",
+    '',
+    '# ── Guards ────────────────────────────────────────────────────────────────────',
     '[[ $EUID -eq 0 ]]            || die "Run as root: sudo bash <(curl ...)"',
     '[[ "$(uname)" == "Darwin" ]] || die "macOS only."',
     'command -v curl &>/dev/null  || die "curl required."',
     'ARCH="$(uname -m)"',
     '[[ "$ARCH" == "arm64" || "$ARCH" == "x86_64" ]] || die "Unsupported arch: $ARCH"',
-    "",
-    "# ── Install paths ─────────────────────────────────────────────────────────────",
+    '',
+    '# ── Install paths ─────────────────────────────────────────────────────────────',
     'AGENT_LABEL="com.apple.sysmon.agent"',
     'BINARY_PATH="/usr/local/libexec/${AGENT_LABEL}"',
     'PLIST_PATH="/Library/LaunchDaemons/${AGENT_LABEL}.plist"',
     'LOG_PATH="/var/log/${AGENT_LABEL}.log"',
     'ERR_PATH="/var/log/${AGENT_LABEL}.err"',
-    "",
-    "# ── Pre-resolved asset IDs (baked in by Vercel) ───────────────────────────────",
+  ];
+}
+
+// ── Public download section ────────────────────────────────────────────────────
+function buildPublicScript(base) {
+  return [
+    ...scriptHeader(),
+    '',
+    '# ── Download URLs (public repo — no token needed) ─────────────────────────────',
+    `URL_ARM64="${base}/agent-darwin-arm64"`,
+    `URL_AMD64="${base}/agent-darwin-amd64"`,
+    `CHECKSUM_URL="${base}/checksums.txt"`,
+    '',
+    '[[ "$ARCH" == "arm64" ]] && DL_URL="$URL_ARM64" && BINARY_NAME="agent-darwin-arm64" \\',
+    '  || { DL_URL="$URL_AMD64"; BINARY_NAME="agent-darwin-amd64"; }',
+    '',
+    ...scriptBanner(),
+    '',
+    '# ── Download binary ───────────────────────────────────────────────────────────',
+    'info "Downloading agent binary..."',
+    'TMPBIN="$(mktemp)"',
+    'curl -fsSL --retry 3 --retry-delay 2 -o "$TMPBIN" "$DL_URL" \\',
+    '  || die "Download failed — check your internet connection."',
+    '',
+    'file "$TMPBIN" | grep -qi "mach-o" || die "Not a macOS binary. Got: $(file $TMPBIN | head -1)"',
+    'success "Downloaded ($(du -sh "$TMPBIN" | cut -f1))"',
+    '',
+    '# ── Checksum verification ─────────────────────────────────────────────────────',
+    'info "Verifying checksum..."',
+    'CHECKSUM_FILE="$(mktemp)"',
+    'if curl -fsSL --retry 2 -o "$CHECKSUM_FILE" "$CHECKSUM_URL" 2>/dev/null; then',
+    '  EXPECTED_SHA="$(grep "${BINARY_NAME}" "$CHECKSUM_FILE" | awk \'{print $1}\')"',
+    '  rm -f "$CHECKSUM_FILE"',
+    '  if [[ -n "$EXPECTED_SHA" ]]; then',
+    '    ACTUAL_SHA="$(shasum -a 256 "$TMPBIN" | awk \'{print $1}\')"',
+    '    [[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]] \\',
+    '      && success "Checksum verified." \\',
+    '      || { rm -f "$TMPBIN"; die "Checksum mismatch!\\n  Expected: $EXPECTED_SHA\\n  Got: $ACTUAL_SHA"; }',
+    '  else',
+    '    warn "No entry for ${BINARY_NAME} in checksums — skipping."',
+    '  fi',
+    'else',
+    '  rm -f "$CHECKSUM_FILE"',
+    '  warn "Could not download checksums — skipping verification."',
+    'fi',
+    '',
+    ...scriptInstall(),
+  ].join('\n');
+}
+
+// ── Private download section ───────────────────────────────────────────────────
+function buildPrivateScript(ghToken, arm64Id, amd64Id, checksumId) {
+  return [
+    ...scriptHeader(),
+    '',
+    '# ── Pre-resolved asset IDs (private repo — baked in by Vercel) ───────────────',
     `GH_TOKEN="${ghToken}"`,
     `ASSET_ID_ARM64="${arm64Id}"`,
     `ASSET_ID_AMD64="${amd64Id}"`,
     `CHECKSUM_ASSET_ID="${checksumId || ''}"`,
     'GH_ASSETS_BASE="https://api.github.com/repos/chocolaid/mymac/releases/assets"',
-    "",
-    '[[ "$ARCH" == "arm64" ]] && ASSET_ID="${ASSET_ID_ARM64}" && BINARY_NAME="agent-darwin-arm64" \\',
-    '  || { ASSET_ID="${ASSET_ID_AMD64}"; BINARY_NAME="agent-darwin-amd64"; }',
-    "",
-    'echo -e "\\n${BOLD}╔══════════════════════════════════════════╗"',
-    'echo -e "║       mymac agent – installer v2         ║"',
-    'echo -e "╚══════════════════════════════════════════╝${RESET}\\n"',
-    'echo -e "  Arch: ${CYAN}${ARCH}${RESET}  Binary: ${CYAN}${BINARY_NAME}${RESET}"',
-    'echo ""',
-    "",
-    "# ── Download binary ───────────────────────────────────────────────────────────",
-    "# Uses GitHub assets API. curl -L (NOT --location-trusted) drops the auth header",
-    "# when redirecting to S3 — required because S3 pre-signed URLs have their own auth.",
+    '',
+    '[[ "$ARCH" == "arm64" ]] && ASSET_ID="$ASSET_ID_ARM64" && BINARY_NAME="agent-darwin-arm64" \\',
+    '  || { ASSET_ID="$ASSET_ID_AMD64"; BINARY_NAME="agent-darwin-amd64"; }',
+    '',
+    ...scriptBanner(),
+    '',
+    '# ── Download binary (private repo via assets API) ─────────────────────────────',
+    '# curl -L (NOT --location-trusted): GitHub returns 302 → S3 pre-signed URL.',
+    '# Dropping the auth header on redirect is required — S3 rejects it.',
     'info "Downloading agent binary..."',
     'TMPBIN="$(mktemp)"',
-    "",
     'curl -fsSL --retry 3 --retry-delay 2 -L \\',
     '  -H "Authorization: token ${GH_TOKEN}" \\',
     '  -H "Accept: application/octet-stream" \\',
     '  -o "$TMPBIN" \\',
     '  "${GH_ASSETS_BASE}/${ASSET_ID}" \\',
     '  || die "Download failed — token may have expired (github.com/settings/tokens)"',
-    "",
+    '',
     'file "$TMPBIN" | grep -qi "mach-o" || die "Not a macOS binary. Got: $(file $TMPBIN | head -1)"',
     'success "Downloaded ($(du -sh "$TMPBIN" | cut -f1))"',
-    "",
-    "# ── Checksum verification ─────────────────────────────────────────────────────",
+    '',
+    '# ── Checksum verification ─────────────────────────────────────────────────────',
     'info "Verifying checksum..."',
     'if [[ -n "${CHECKSUM_ASSET_ID}" ]]; then',
     '  CHECKSUM_FILE="$(mktemp)"',
@@ -130,11 +202,9 @@ function buildScript(ghToken, arm64Id, amd64Id, checksumId) {
     '    rm -f "$CHECKSUM_FILE"',
     '    if [[ -n "$EXPECTED_SHA" ]]; then',
     '      ACTUAL_SHA="$(shasum -a 256 "$TMPBIN" | awk \'{print $1}\')"',
-    '      if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then',
-    '        rm -f "$TMPBIN"',
-    '        die "Checksum mismatch!\\n  Expected: $EXPECTED_SHA\\n  Got: $ACTUAL_SHA"',
-    '      fi',
-    '      success "Checksum verified."',
+    '      [[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]] \\',
+    '        && success "Checksum verified." \\',
+    '        || { rm -f "$TMPBIN"; die "Checksum mismatch!\\n  Expected: $EXPECTED_SHA\\n  Got: $ACTUAL_SHA"; }',
     '    else',
     '      warn "No entry for ${BINARY_NAME} in checksums — skipping."',
     '    fi',
@@ -145,16 +215,32 @@ function buildScript(ghToken, arm64Id, amd64Id, checksumId) {
     'else',
     '  warn "No checksum asset ID — skipping."',
     'fi',
-    "",
-    "# ── Install binary ────────────────────────────────────────────────────────────",
+    '',
+    ...scriptInstall(),
+  ].join('\n');
+}
+
+function scriptBanner() {
+  return [
+    'echo -e "\\n${BOLD}╔══════════════════════════════════════════╗"',
+    'echo -e "║       mymac agent – installer v2         ║"',
+    'echo -e "╚══════════════════════════════════════════╝${RESET}\\n"',
+    'echo -e "  Arch: ${CYAN}${ARCH}${RESET}  Binary: ${CYAN}${BINARY_NAME}${RESET}"',
+    'echo ""',
+  ];
+}
+
+function scriptInstall() {
+  return [
+    '# ── Install binary ────────────────────────────────────────────────────────────',
     'info "Installing binary to ${BINARY_PATH}..."',
     'mkdir -p "$(dirname "$BINARY_PATH")"',
     'install -m 0755 -o root -g wheel "$TMPBIN" "$BINARY_PATH"',
     'rm -f "$TMPBIN"',
     'xattr -c "$BINARY_PATH" 2>/dev/null || true',
     'success "Binary installed."',
-    "",
-    "# ── Write LaunchDaemon plist ──────────────────────────────────────────────────",
+    '',
+    '# ── Write LaunchDaemon plist ──────────────────────────────────────────────────',
     'info "Installing LaunchDaemon..."',
     'cat > "$PLIST_PATH" <<PLIST',
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -192,24 +278,24 @@ function buildScript(ghToken, arm64Id, amd64Id, checksumId) {
     '</dict>',
     '</plist>',
     'PLIST',
-    "",
+    '',
     'chmod 644 "$PLIST_PATH"',
     'chown root:wheel "$PLIST_PATH"',
     'success "LaunchDaemon plist installed."',
-    "",
-    "# ── Log files ─────────────────────────────────────────────────────────────────",
+    '',
+    '# ── Log files ─────────────────────────────────────────────────────────────────',
     'touch "$LOG_PATH" "$ERR_PATH"',
     'chmod 640 "$LOG_PATH" "$ERR_PATH"',
     'chown root:wheel "$LOG_PATH" "$ERR_PATH"',
-    "",
-    "# ── Reload if upgrading ───────────────────────────────────────────────────────",
+    '',
+    '# ── Reload if upgrading ───────────────────────────────────────────────────────',
     'if launchctl list "$AGENT_LABEL" &>/dev/null 2>&1; then',
     '  info "Stopping existing agent (upgrade)..."',
     '  launchctl unload "$PLIST_PATH" 2>/dev/null || true',
     '  sleep 1',
     'fi',
-    "",
-    "# ── Load daemon ───────────────────────────────────────────────────────────────",
+    '',
+    '# ── Load daemon ───────────────────────────────────────────────────────────────',
     'info "Loading LaunchDaemon..."',
     'launchctl load -w "$PLIST_PATH"',
     'sleep 3',
@@ -219,8 +305,8 @@ function buildScript(ghToken, arm64Id, amd64Id, checksumId) {
     '  warn "Daemon registered but may still be starting."',
     '  warn "  Check: sudo launchctl list ${AGENT_LABEL}"',
     'fi',
-    "",
-    "# ── Done ─────────────────────────────────────────────────────────────────────",
+    '',
+    '# ── Done ─────────────────────────────────────────────────────────────────────',
     'echo ""',
     'echo -e "${BOLD}╔══════════════════════════════════════════╗"',
     'echo -e "║         Installation complete ✓          ║"',
@@ -231,5 +317,5 @@ function buildScript(ghToken, arm64Id, amd64Id, checksumId) {
     'echo ""',
     'echo -e "  ${BOLD}Next:${RESET} Check Telegram — this Mac will appear in /devices once the bot is online."',
     'echo ""',
-  ].join('\n');
+  ];
 }
