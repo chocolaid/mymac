@@ -284,6 +284,7 @@ function waitForResult(id, chatId, hostname, cmd, deadline = Date.now() + 90_000
 
 // ─── Express REST API (Mac agents connect here) ───────────────────────────────
 const app = express();
+app.set('trust proxy', 1); // required when behind localtunnel / reverse proxy
 app.use(helmet());
 app.use(express.json({ limit: '20mb' }));
 app.use('/api', rateLimit({ windowMs: 10_000, max: 60 }));
