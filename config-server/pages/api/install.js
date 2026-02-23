@@ -66,61 +66,29 @@ echo -e "╚══════════════════════�
 echo -e "  Architecture: \${CYAN}\${ARCH}\${RESET} → binary: \${CYAN}agent-darwin-\${BINARY_SUFFIX}\${RESET}"
 echo ""
 
-# ── GitHub asset download (private repo) ─────────────────────────────────────
-# Direct release URLs redirect to S3 which strips auth headers.
-# Instead: use GitHub API to get the asset download URL, then fetch with auth.
-info "Resolving asset download URL from GitHub API..."
-
-GH_API="https://api.github.com/repos/chocolaid/mymac/releases/tags/v2.0.2"
-RELEASE_JSON="\$(curl -fsSL \\
-  -H "Authorization: token \${GH_TOKEN}" \\
-  -H "Accept: application/vnd.github+json" \\
-  "\$GH_API")" || die "Failed to reach GitHub API. Check network connectivity."
-
-ASSET_ID="\$(echo "\$RELEASE_JSON" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-suffix = 'agent-darwin-${BINARY_SUFFIX}'
-for a in data.get('assets', []):
-    if a['name'] == suffix:
-        print(a['id'])
-        break
-" 2>/dev/null)"
-
-[[ -n "\$ASSET_ID" ]] || die "Could not find asset agent-darwin-\${BINARY_SUFFIX} in release v2.0.2."
-success "Found asset ID: \$ASSET_ID"
-
-# ── Download binary via assets API (handles private repo auth correctly) ──────
+# ── Download binary (private repo — auth kept through S3 redirect) ────────────
+# --location-trusted keeps the Authorization header through GitHub's S3 redirect.
 info "Downloading agent binary..."
 TMPBIN="\$(mktemp)"
+BINARY_URL="https://github.com/chocolaid/mymac/releases/download/v2.0.2/agent-darwin-\${BINARY_SUFFIX}"
 
 curl -fsSL --retry 3 --retry-delay 2 \\
+  --location-trusted \\
   -H "Authorization: token \${GH_TOKEN}" \\
-  -H "Accept: application/octet-stream" \\
   -o "\$TMPBIN" \\
-  "https://api.github.com/repos/chocolaid/mymac/releases/assets/\${ASSET_ID}" \\
-  || die "Download failed — GitHub token may have expired or lost repo scope."
+  "\$BINARY_URL" \\
+  || die "Download failed — check token at github.com/settings/tokens"
 
-file "\$TMPBIN" | grep -qi "mach-o" || die "Downloaded file is not a macOS binary. Got: \$(file "\$TMPBIN")"
+file "\$TMPBIN" | grep -qi "mach-o" || die "Downloaded file is not a macOS binary."
 success "Downloaded (\$(du -sh "\$TMPBIN" | cut -f1))"
 
 # ── Checksum verification ─────────────────────────────────────────────────────
 info "Verifying checksum..."
-CHECKSUM_ASSET_ID="\$(echo "\$RELEASE_JSON" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for a in data.get('assets', []):
-    if a['name'] == 'checksums.txt':
-        print(a['id'])
-        break
-" 2>/dev/null)"
-
 CHECKSUM_FILE="\$(mktemp)"
-if [[ -n "\$CHECKSUM_ASSET_ID" ]] && curl -fsSL --retry 2 \\
+CHECKSUM_URL="https://github.com/chocolaid/mymac/releases/download/v2.0.2/checksums.txt"
+if curl -fsSL --retry 2 --location-trusted \\
   -H "Authorization: token \${GH_TOKEN}" \\
-  -H "Accept: application/octet-stream" \\
-  -o "\$CHECKSUM_FILE" \\
-  "https://api.github.com/repos/chocolaid/mymac/releases/assets/\${CHECKSUM_ASSET_ID}" 2>/dev/null; then
+  -o "\$CHECKSUM_FILE" "\$CHECKSUM_URL" 2>/dev/null; then
   EXPECTED_SHA="\$(grep "agent-darwin-\${BINARY_SUFFIX}" "\$CHECKSUM_FILE" | awk '{print \$1}')"
   rm -f "\$CHECKSUM_FILE"
   if [[ -n "\$EXPECTED_SHA" ]]; then
