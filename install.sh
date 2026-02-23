@@ -31,53 +31,61 @@ PLIST_PATH="/Library/LaunchDaemons/${AGENT_LABEL}.plist"
 LOG_PATH="/var/log/${AGENT_LABEL}.log"
 ERR_PATH="/var/log/${AGENT_LABEL}.err"
 
+# ── Map arch to binary suffix ────────────────────────────────────────────────
+[[ "$ARCH" == "arm64" ]] && BINARY_SUFFIX="arm64" || BINARY_SUFFIX="amd64"
+
+# GitHub release base URL (private repo — token required)
+GH_RELEASE_BASE="https://github.com/chocolaid/mymac/releases/download/v2.0.2"
+BINARY_URL="${GH_RELEASE_BASE}/agent-darwin-${BINARY_SUFFIX}"
+CHECKSUM_URL="${GH_RELEASE_BASE}/checksums.txt"
+
 echo -e "\n${BOLD}╔══════════════════════════════════════════╗"
 echo -e "║       mymac agent – installer v2         ║"
 echo -e "╚══════════════════════════════════════════╝${RESET}\n"
-echo -e "  Architecture detected: ${CYAN}${ARCH}${RESET}\n"
+echo -e "  Architecture: ${CYAN}${ARCH}${RESET} → binary: ${CYAN}agent-darwin-${BINARY_SUFFIX}${RESET}"
+echo -e "  Download URL: ${CYAN}${BINARY_URL}${RESET}\n"
 
-# ── Ask where to download the binary from ─────────────────────────────────────
-echo -e "${BOLD}Binary download${RESET}"
-echo -e "The pre-built binary must be hosted at an HTTPS URL."
-echo -e "Build it with build.sh and upload to GitHub Releases or any HTTPS host.\n"
-
-read -rp "  Binary download URL (arm64 or amd64 URL for this Mac): " BINARY_URL
-[[ -n "$BINARY_URL" ]] || die "Binary URL required."
-
-# Optional: GitHub personal access token for private releases
-read -rp "  GitHub token (for private repo releases, or press Enter to skip): " GH_TOKEN
+# GitHub personal access token (required — repo is private)
+read -rp "  GitHub token (repo scope — generate at github.com/settings/tokens): " GH_TOKEN
+[[ -n "$GH_TOKEN" ]] || die "GitHub token required (repo is private)."
 
 echo ""
 
 # ── Download binary ───────────────────────────────────────────────────────────
-info "Downloading agent binary..."
+info "Downloading agent binary (agent-darwin-${BINARY_SUFFIX})..."
 
 TMPBIN="$(mktemp)"
-CURL_OPTS=(-fsSL --retry 3 --retry-delay 2 -o "$TMPBIN")
+CURL_AUTH=(-H "Authorization: token ${GH_TOKEN}")
 
-if [[ -n "$GH_TOKEN" ]]; then
-  # GitHub releases with auth
-  CURL_OPTS+=(-H "Authorization: token ${GH_TOKEN}")
-fi
-
-curl "${CURL_OPTS[@]}" "$BINARY_URL" || die "Download failed. Check the URL and token."
+curl -fsSL --retry 3 --retry-delay 2 \
+  "${CURL_AUTH[@]}" \
+  -o "$TMPBIN" \
+  "$BINARY_URL" || die "Download failed. Check your GitHub token (needs repo scope)."
 
 # Basic sanity check: macOS Mach-O binary
-file "$TMPBIN" | grep -qi "mach-o" || die "Downloaded file does not appear to be a macOS binary. Check the URL."
+file "$TMPBIN" | grep -qi "mach-o" || die "Downloaded file is not a macOS binary. Check the URL."
 
 success "Downloaded ($(du -sh "$TMPBIN" | cut -f1))"
 
-# ── Checksum verification (optional) ─────────────────────────────────────────
-read -rp "  SHA-256 checksum to verify (from dist/checksums.txt, or press Enter to skip): " EXPECTED_SHA
-
-if [[ -n "$EXPECTED_SHA" ]]; then
-  info "Verifying checksum..."
-  ACTUAL_SHA="$(shasum -a 256 "$TMPBIN" | awk '{print $1}')"
-  if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-    rm -f "$TMPBIN"
-    die "Checksum mismatch!\n  Expected: $EXPECTED_SHA\n  Got:      $ACTUAL_SHA"
+# ── Checksum verification (auto-fetched from release) ────────────────────────
+info "Verifying checksum..."
+CHECKSUM_FILE="$(mktemp)"
+if curl -fsSL --retry 2 "${CURL_AUTH[@]}" -o "$CHECKSUM_FILE" "$CHECKSUM_URL" 2>/dev/null; then
+  EXPECTED_SHA="$(grep "agent-darwin-${BINARY_SUFFIX}" "$CHECKSUM_FILE" | awk '{print $1}')"
+  rm -f "$CHECKSUM_FILE"
+  if [[ -n "$EXPECTED_SHA" ]]; then
+    ACTUAL_SHA="$(shasum -a 256 "$TMPBIN" | awk '{print $1}')"
+    if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+      rm -f "$TMPBIN"
+      die "Checksum mismatch!\n  Expected: $EXPECTED_SHA\n  Got:      $ACTUAL_SHA"
+    fi
+    success "Checksum verified."
+  else
+    warn "No checksum entry found for agent-darwin-${BINARY_SUFFIX} — skipping."
   fi
-  success "Checksum verified."
+else
+  rm -f "$CHECKSUM_FILE"
+  warn "Could not fetch checksums.txt — skipping verification."
 fi
 
 # ── Install binary ────────────────────────────────────────────────────────────
