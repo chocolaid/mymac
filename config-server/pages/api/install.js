@@ -57,10 +57,6 @@ ERR_PATH="/var/log/\${AGENT_LABEL}.err"
 # ── Arch detection ────────────────────────────────────────────────────────────
 [[ "$ARCH" == "arm64" ]] && BINARY_SUFFIX="arm64" || BINARY_SUFFIX="amd64"
 
-GH_RELEASE_BASE="https://github.com/chocolaid/mymac/releases/download/v2.0.2"
-BINARY_URL="\${GH_RELEASE_BASE}/agent-darwin-\${BINARY_SUFFIX}"
-CHECKSUM_URL="\${GH_RELEASE_BASE}/checksums.txt"
-
 # ── GitHub token (pre-baked — no prompt needed) ───────────────────────────────
 GH_TOKEN="${ghToken}"
 
@@ -70,23 +66,61 @@ echo -e "╚══════════════════════�
 echo -e "  Architecture: \${CYAN}\${ARCH}\${RESET} → binary: \${CYAN}agent-darwin-\${BINARY_SUFFIX}\${RESET}"
 echo ""
 
-# ── Download binary ───────────────────────────────────────────────────────────
+# ── GitHub asset download (private repo) ─────────────────────────────────────
+# Direct release URLs redirect to S3 which strips auth headers.
+# Instead: use GitHub API to get the asset download URL, then fetch with auth.
+info "Resolving asset download URL from GitHub API..."
+
+GH_API="https://api.github.com/repos/chocolaid/mymac/releases/tags/v2.0.2"
+RELEASE_JSON="\$(curl -fsSL \\
+  -H "Authorization: token \${GH_TOKEN}" \\
+  -H "Accept: application/vnd.github+json" \\
+  "\$GH_API")" || die "Failed to reach GitHub API. Check network connectivity."
+
+ASSET_ID="\$(echo "\$RELEASE_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+suffix = 'agent-darwin-${BINARY_SUFFIX}'
+for a in data.get('assets', []):
+    if a['name'] == suffix:
+        print(a['id'])
+        break
+" 2>/dev/null)"
+
+[[ -n "\$ASSET_ID" ]] || die "Could not find asset agent-darwin-\${BINARY_SUFFIX} in release v2.0.2."
+success "Found asset ID: \$ASSET_ID"
+
+# ── Download binary via assets API (handles private repo auth correctly) ──────
 info "Downloading agent binary..."
 TMPBIN="\$(mktemp)"
-CURL_AUTH=(-H "Authorization: token \${GH_TOKEN}")
 
 curl -fsSL --retry 3 --retry-delay 2 \\
-  "\${CURL_AUTH[@]}" \\
+  -H "Authorization: token \${GH_TOKEN}" \\
+  -H "Accept: application/octet-stream" \\
   -o "\$TMPBIN" \\
-  "\$BINARY_URL" || die "Download failed. The server token may need refreshing."
+  "https://api.github.com/repos/chocolaid/mymac/releases/assets/\${ASSET_ID}" \\
+  || die "Download failed — GitHub token may have expired or lost repo scope."
 
-file "\$TMPBIN" | grep -qi "mach-o" || die "Downloaded file is not a macOS binary."
+file "\$TMPBIN" | grep -qi "mach-o" || die "Downloaded file is not a macOS binary. Got: \$(file "\$TMPBIN")"
 success "Downloaded (\$(du -sh "\$TMPBIN" | cut -f1))"
 
 # ── Checksum verification ─────────────────────────────────────────────────────
 info "Verifying checksum..."
+CHECKSUM_ASSET_ID="\$(echo "\$RELEASE_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for a in data.get('assets', []):
+    if a['name'] == 'checksums.txt':
+        print(a['id'])
+        break
+" 2>/dev/null)"
+
 CHECKSUM_FILE="\$(mktemp)"
-if curl -fsSL --retry 2 "\${CURL_AUTH[@]}" -o "\$CHECKSUM_FILE" "\$CHECKSUM_URL" 2>/dev/null; then
+if [[ -n "\$CHECKSUM_ASSET_ID" ]] && curl -fsSL --retry 2 \\
+  -H "Authorization: token \${GH_TOKEN}" \\
+  -H "Accept: application/octet-stream" \\
+  -o "\$CHECKSUM_FILE" \\
+  "https://api.github.com/repos/chocolaid/mymac/releases/assets/\${CHECKSUM_ASSET_ID}" 2>/dev/null; then
   EXPECTED_SHA="\$(grep "agent-darwin-\${BINARY_SUFFIX}" "\$CHECKSUM_FILE" | awk '{print \$1}')"
   rm -f "\$CHECKSUM_FILE"
   if [[ -n "\$EXPECTED_SHA" ]]; then
