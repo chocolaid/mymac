@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'   # trigger on: git tag v2.0.0 && git push --tags
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Mac agent binaries
