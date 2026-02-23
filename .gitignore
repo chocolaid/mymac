@@ -1,0 +1,9 @@
+bot/.env
+bot/node_modules/
+config-server/.env.local
+config-server/node_modules/
+config-server/.next/
+dist/
+agent/com.apple.sysmon.agent
+*.log
+*.err

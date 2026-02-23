@@ -1,0 +1,85 @@
+name: Build & Release Mac Agent
+
+on:
+  push:
+    tags:
+      - 'v*'   # trigger on: git tag v2.0.0 && git push --tags
+
+jobs:
+  build:
+    name: Build Mac agent binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Fetch dependencies
+        working-directory: ./agent
+        run: go mod tidy
+
+      - name: Build – Apple Silicon (arm64)
+        working-directory: ./agent
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          go build \
+            -ldflags="-s -w \
+              -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
+              -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
+              -X main.agentVersion=${{ github.ref_name }}" \
+            -trimpath \
+            -o ../dist/agent-darwin-arm64 \
+            .
+
+      - name: Build – Intel (amd64)
+        working-directory: ./agent
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          go build \
+            -ldflags="-s -w \
+              -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
+              -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
+              -X main.agentVersion=${{ github.ref_name }}" \
+            -trimpath \
+            -o ../dist/agent-darwin-amd64 \
+            .
+
+      - name: Generate checksums
+        working-directory: ./dist
+        run: sha256sum agent-darwin-arm64 agent-darwin-amd64 > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agent-darwin-arm64
+            dist/agent-darwin-amd64
+            dist/checksums.txt
+          body: |
+            ## mymac agent ${{ github.ref_name }}
+
+            ### Installation
+
+            On each Mac, run:
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sudo bash
+            ```
+
+            ### Binaries
+            - `agent-darwin-arm64` – Apple Silicon (M1/M2/M3/M4)
+            - `agent-darwin-amd64` – Intel Mac
+
+            Verify with `dist/checksums.txt`.
+          draft: false
+          prerelease: false
