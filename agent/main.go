@@ -87,6 +87,7 @@ func doRequest(baseURL, method, path, authHeader, authValue string, body interfa
 		return nil, 0, err
 	}
 	req.Header.Set(authHeader, authValue)
+	req.Header.Set("bypass-tunnel-reminder", "true") // bypass localtunnel challenge page
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -178,7 +179,12 @@ func registerDevice() error {
 func heartbeatLoop() {
 	for {
 		time.Sleep(heartbeatInterval)
-		body, status, err := vercelRequest("POST", "/api/devices/heartbeat", map[string]string{"deviceId": deviceID})
+		body, status, err := vercelRequest("POST", "/api/devices/heartbeat", map[string]string{
+			"deviceId":     deviceID,
+			"hostname":     hostname,
+			"arch":         runtime.GOARCH,
+			"agentVersion": agentVersion,
+		})
 		if err != nil || status != 200 {
 			log.Printf("Heartbeat failed: %v (status %d)", err, status)
 			continue

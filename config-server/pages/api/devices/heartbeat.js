@@ -13,8 +13,20 @@ export default async function handler(req, res) {
   const { deviceId } = req.body ?? {};
   if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
 
+  const { hostname, arch, agentVersion } = req.body ?? {};
   const store = (await ecGet('devices')) ?? {};
-  if (!store[deviceId]) return res.status(404).json({ error: 'unknown device' });
+
+  // Auto-register if unknown — handles agents that started when writes were broken
+  if (!store[deviceId]) {
+    const now = new Date().toISOString();
+    store[deviceId] = {
+      deviceId,
+      hostname:     hostname     ?? deviceId,
+      arch:         arch         ?? 'unknown',
+      agentVersion: agentVersion ?? '0',
+      firstSeen: now, lastSeen: now,
+    };
+  }
 
   store[deviceId] = { ...store[deviceId], lastSeen: new Date().toISOString() };
   await ecSet({ devices: store });
