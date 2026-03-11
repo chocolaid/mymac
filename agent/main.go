@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
@@ -221,6 +222,24 @@ func executeCommand(cmd string) (string, int) {
 		"SHELL=/bin/bash",
 		"TERM=xterm-256color",
 	}
+	// Run in its own process group so the entire group can be killed on timeout.
+	// Without this, killing bash leaves child processes (e.g. screencapture,
+	// osascript) alive; they hold the stdout pipe open and c.Run() blocks forever.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Override the default cancel to kill the whole process group, not just bash.
+	c.Cancel = func() error {
+		if c.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+		if err != nil && err != syscall.ESRCH {
+			log.Printf("kill process group -%d: %v", c.Process.Pid, err)
+		}
+		return err
+	}
+	// After the context fires and the group is killed, force-close any pipes
+	// that are still open after a short grace period so c.Run() always returns.
+	c.WaitDelay = 3 * time.Second
 
 	err := c.Run()
 	code := 0
