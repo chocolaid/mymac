@@ -28,7 +28,13 @@ export default async function handler(req, res) {
     };
   }
 
-  store[deviceId] = { ...store[deviceId], lastSeen: new Date().toISOString() };
+  store[deviceId] = {
+    ...store[deviceId],
+    ...(hostname     && { hostname }),
+    ...(arch         && { arch }),
+    ...(agentVersion && { agentVersion }),
+    lastSeen: new Date().toISOString(),
+  };
   await ecSet({ devices: store });
 
   const cfg = (await ecGet('config')) ?? {};
