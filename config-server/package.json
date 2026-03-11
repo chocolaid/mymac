@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "firebase-admin": "^13.7.0",
     "next": "14.2.3"
   }
 }

@@ -1,7 +1,7 @@
 // pages/api/config.js
 // GET  – agents fetch current server config
 // POST – bot updates the server config
-import { ecGet, ecSet } from '../../lib/ec';
+import { ecGet, ecSet } from '../../lib/db';
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 

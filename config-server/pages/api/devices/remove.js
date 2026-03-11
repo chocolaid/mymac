@@ -1,6 +1,6 @@
 // pages/api/devices/remove.js
 // POST – remove a device registration
-import { ecGet, ecSet } from '../../../lib/ec';
+import { ecGet, ecSet } from '../../../lib/db';
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 

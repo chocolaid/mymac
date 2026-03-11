@@ -1,6 +1,6 @@
 // pages/api/devices/heartbeat.js
 // POST – agent calls every 60 s to update lastSeen and get config version
-import { ecGet, ecSet } from '../../../lib/ec';
+import { ecGet, ecSet } from '../../../lib/db';
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 

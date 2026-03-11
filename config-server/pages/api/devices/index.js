@@ -1,7 +1,7 @@
 // pages/api/devices/index.js
 // GET  – bot lists all registered devices
 // POST – agent registers itself on boot
-import { ecGet, ecSet } from '../../../lib/ec';
+import { ecGet, ecSet } from '../../../lib/db';
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 
