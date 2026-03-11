@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh – mymac agent installer
 # Downloads and installs the pre-built agent binary as a root LaunchDaemon.
-# NO compilation required on the Mac. No dependencies beyond curl (built-in).
+# NO compilation required on the Mac. No dependencies beyond curl (built-in). 1
 #
 # Usage: sudo bash install.sh
 # ─────────────────────────────────────────────────────────────────────────────
