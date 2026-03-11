@@ -213,21 +213,21 @@ bot.onText(/^\/clear$/, (msg) => {
 
 // ── Built-in shortcut commands (broadcast to all) ─────────────────────────────
 const SHORTCUTS = {
-  '/sysinfo':    'system_profiler SPHardwareDataType SPSoftwareDataType 2>/dev/null',
-  '/procs':      'ps aux | sort -rk 3 | head -20',
-  '/netstat':    'lsof -i -n -P | grep ESTABLISHED',
-  '/uptime':     'uptime && sw_vers',
-  '/wifi':       '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I',
-  '/disk':       'df -h',
-  '/screenshot': 'screencapture -t jpg /tmp/_sc.jpg && base64 /tmp/_sc.jpg && rm -f /tmp/_sc.jpg',
-  '/lock':       "osascript -e 'tell application \"System Events\" to keystroke \"q\" using {command down, control down}'",
-  '/sleep':      'pmset sleepnow',
+  '/sysinfo':    { cmd: 'system_profiler SPHardwareDataType SPSoftwareDataType 2>/dev/null' },
+  '/procs':      { cmd: 'ps aux | sort -rk 3 | head -20' },
+  '/netstat':    { cmd: 'lsof -i -n -P | grep ESTABLISHED' },
+  '/uptime':     { cmd: 'uptime && sw_vers' },
+  '/wifi':       { cmd: '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I' },
+  '/disk':       { cmd: 'df -h' },
+  '/screenshot': { cmd: 'screencapture -t jpg /tmp/_sc.jpg && base64 /tmp/_sc.jpg && rm -f /tmp/_sc.jpg', type: 'screenshot' },
+  '/lock':       { cmd: "osascript -e 'tell application \"System Events\" to keystroke \"q\" using {command down, control down}'" },
+  '/sleep':      { cmd: 'pmset sleepnow' },
 };
 
-Object.entries(SHORTCUTS).forEach(([trigger, cmd]) => {
+Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
   bot.onText(new RegExp(`^\\${trigger}$`), async (msg) => {
     if (!isAuthorized(msg)) return;
-    await broadcast(msg.chat.id, cmd, trigger);
+    await broadcast(msg.chat.id, cmd, trigger, type);
   });
 });
 
@@ -248,29 +248,40 @@ bot.onText(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (msg, match) => {
 });
 
 // ─── Core: enqueue + broadcast ────────────────────────────────────────────────
-async function broadcast(chatId, cmd, label) {
+async function broadcast(chatId, cmd, label, type) {
   const devices = await getDevices();
   if (!devices.length) return reply(chatId, 'No devices registered yet.');
   reply(chatId, `📡 Broadcasting to *${devices.length}* Mac(s):\n\`\`\`\n${label}\n\`\`\``);
-  for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd);
+  for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd, type);
 }
 
-function enqueue(chatId, deviceId, hostname, cmd) {
+function enqueue(chatId, deviceId, hostname, cmd, type) {
   const id = uuidv4();
   if (!deviceQueues[deviceId]) deviceQueues[deviceId] = [];
   deviceQueues[deviceId].push({ id, cmd, chatId, requestedAt: Date.now() });
-  waitForResult(id, chatId, hostname, cmd);
+  waitForResult(id, chatId, hostname, cmd, type);
 }
 
-function waitForResult(id, chatId, hostname, cmd, deadline = Date.now() + 90_000) {
+function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 90_000) {
   const tick = () => {
     if (resultStore[id]) {
       const { output, exitCode } = resultStore[id];
+      delete resultStore[id];
+
+      if (type === 'screenshot' && exitCode === 0 && output.trim().length > 0) {
+        const buf = Buffer.from(output.trim(), 'base64');
+        bot.sendPhoto(chatId, buf, { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' })
+          .catch((err) => {
+            console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
+            reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
+          });
+        return;
+      }
+
       const text = output.length > 3500
         ? output.slice(0, 3500) + '\n…(truncated)'
         : output || '(no output)';
       reply(chatId, `📋 *${hostname}* \\(exit ${exitCode}\\)\n\`\`\`\n${text}\n\`\`\``);
-      delete resultStore[id];
       return;
     }
     if (Date.now() > deadline) {
