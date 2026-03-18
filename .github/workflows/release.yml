@@ -37,7 +37,8 @@ jobs:
             -ldflags="-s -w \
               -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
               -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
-              -X main.agentVersion=${{ github.ref_name }}" \
+              -X main.agentVersion=${{ github.ref_name }} \
+              -X main.githubToken=${{ secrets.GITHUB_UPDATE_TOKEN }}" \
             -trimpath \
             -o ../dist/agent-darwin-arm64 \
             .
@@ -53,7 +54,8 @@ jobs:
             -ldflags="-s -w \
               -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
               -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
-              -X main.agentVersion=${{ github.ref_name }}" \
+              -X main.agentVersion=${{ github.ref_name }} \
+              -X main.githubToken=${{ secrets.GITHUB_UPDATE_TOKEN }}" \
             -trimpath \
             -o ../dist/agent-darwin-amd64 \
             .

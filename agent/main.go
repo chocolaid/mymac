@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,11 +26,13 @@ import (
 )
 
 // ─── Baked in at build time via -ldflags ─────────────────────────────────────
-// Only these two values are baked in. Everything else comes from Vercel at runtime.
+// Only these values are baked in. Everything else comes from Vercel at runtime.
 var (
 	configServerURL = "https://mymac-config.vercel.app" // Vercel config server (permanent)
 	adminToken      = "CHANGEME"                         // x-admin-token for Vercel
 	agentVersion    = "2.0.0"
+	githubRepo      = "chocolaid/mymac" // GitHub repo used for release update checks
+	githubToken     = ""                // GitHub token for downloading assets (required for private repos)
 )
 
 // ─── Runtime config (fetched from Vercel, refreshed every 5 min) ─────────────
@@ -43,11 +47,20 @@ var (
 	currentConfig     ServerConfig
 	currentConfigMu   sync.RWMutex
 	lastKnownVersion  int
-	configPollInterval = 5 * time.Minute
-	cmdPollInterval    = 3 * time.Second
-	heartbeatInterval  = 60 * time.Second
-	cmdTimeout         = 60 * time.Second
-	logFile            = "/var/log/com.apple.sysmon.agent.log"
+	configPollInterval  = 5 * time.Minute
+	cmdPollInterval     = 3 * time.Second
+	heartbeatInterval   = 60 * time.Second
+	updateInterval      = 1 * time.Hour
+	updateInitialDelay  = 5 * time.Minute // wait after startup before first update check
+	cmdTimeout          = 60 * time.Second
+	logFile             = "/var/log/com.apple.sysmon.agent.log"
+)
+
+const (
+	maxReleaseResponseSize = 1 * 1024 * 1024   // 1 MB — GitHub releases JSON
+	maxBinaryDownloadSize  = 100 * 1024 * 1024 // 100 MB — agent binary
+	assetDownloadTimeout   = 5 * time.Minute   // generous timeout for large binary downloads
+	executableFileMode     = 0755
 )
 
 // ─── Device identity ──────────────────────────────────────────────────────────
@@ -328,6 +341,203 @@ func commandLoop() {
 	}
 }
 
+// ─── Self-update ──────────────────────────────────────────────────────────────
+type githubRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"assets"`
+}
+
+// semverLess returns true if version a is older than version b.
+// Both versions are expected to be in "vX.Y.Z" or "X.Y.Z" form.
+func semverLess(a, b string) bool {
+	parse := func(v string) [3]int {
+		v = strings.TrimPrefix(v, "v")
+		var nums [3]int
+		for i, p := range strings.SplitN(v, ".", 3) {
+			nums[i], _ = strconv.Atoi(p)
+		}
+		return nums
+	}
+	av, bv := parse(a), parse(b)
+	for i := range av {
+		if av[i] != bv[i] {
+			return av[i] < bv[i]
+		}
+	}
+	return false
+}
+
+func fetchLatestRelease() (*githubRelease, error) {
+	url := "https://api.github.com/repos/" + githubRepo + "/releases/latest"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
+	if githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub releases API returned %d", resp.StatusCode)
+	}
+	var rel githubRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxReleaseResponseSize)).Decode(&rel); err != nil {
+		return nil, err
+	}
+	return &rel, nil
+}
+
+// downloadAsset fetches a GitHub release asset by its numeric ID.
+// Works for both public repos (no token needed) and private repos (token required).
+func downloadAsset(assetID int) ([]byte, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/assets/%d", githubRepo, assetID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
+	if githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+	}
+	client := &http.Client{Timeout: assetDownloadTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("asset download returned %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBinaryDownloadSize))
+}
+
+// applyUpdate atomically replaces the running binary with newData and returns.
+// The caller should exit immediately so LaunchDaemon restarts with the new binary.
+func applyUpdate(newData []byte) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolve symlinks: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(exe), ".mymac-update-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+	if _, err := tmp.Write(newData); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(executableFileMode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, exe); err != nil {
+		return fmt.Errorf("replace binary: %w", err)
+	}
+	return nil
+}
+
+// downloadAndApply downloads the release binary, verifies its checksum, and
+// replaces the running binary on disk.  Returns an error on any failure.
+func downloadAndApply(tagName, binaryName string, binaryID, checksumID int) error {
+	var expectedSHA string
+	if checksumID != 0 {
+		csData, err := downloadAsset(checksumID)
+		if err != nil {
+			return fmt.Errorf("download checksums: %w", err)
+		}
+		for _, line := range strings.Split(string(csData), "\n") {
+			if strings.Contains(line, binaryName) {
+				if fields := strings.Fields(line); len(fields) >= 1 {
+					expectedSHA = fields[0]
+				}
+				break
+			}
+		}
+	}
+
+	log.Printf("Downloading %s %s...", binaryName, tagName)
+	data, err := downloadAsset(binaryID)
+	if err != nil {
+		return fmt.Errorf("download binary: %w", err)
+	}
+
+	if expectedSHA != "" {
+		sum := sha256.Sum256(data)
+		if actual := fmt.Sprintf("%x", sum[:]); actual != expectedSHA {
+			return fmt.Errorf("checksum mismatch: expected %s got %s", expectedSHA, actual)
+		}
+		log.Printf("Checksum verified for %s", binaryName)
+	} else {
+		log.Printf("Warning: no checksum found for %s — proceeding without verification", binaryName)
+	}
+
+	return applyUpdate(data)
+}
+
+func updatePoller() {
+	if githubRepo == "" {
+		return
+	}
+	time.Sleep(updateInitialDelay) // let the agent settle before the first check
+	for {
+		rel, err := fetchLatestRelease()
+		if err != nil {
+			log.Printf("Update check error: %v", err)
+		} else if semverLess(agentVersion, rel.TagName) {
+			log.Printf("New version available: %s → %s", agentVersion, rel.TagName)
+
+			binaryName := "agent-darwin-amd64"
+			if runtime.GOARCH == "arm64" {
+				binaryName = "agent-darwin-arm64"
+			}
+
+			var binaryID, checksumID int
+			for _, a := range rel.Assets {
+				switch a.Name {
+				case binaryName:
+					binaryID = a.ID
+				case "checksums.txt":
+					checksumID = a.ID
+				}
+			}
+
+			if binaryID == 0 {
+				log.Printf("No %s asset found in release %s", binaryName, rel.TagName)
+			} else if err := downloadAndApply(rel.TagName, binaryName, binaryID, checksumID); err != nil {
+				log.Printf("Update failed: %v", err)
+			} else {
+				sendAlert(fmt.Sprintf("Agent on %s updated %s → %s — restarting", hostname, agentVersion, rel.TagName))
+				log.Printf("Updated to %s — restarting", rel.TagName)
+				// The daemon is stateless; LaunchDaemon's KeepAlive will immediately
+				// restart the process with the newly installed binary.
+				os.Exit(0)
+			}
+		} else {
+			log.Printf("Update check: already on latest (%s)", agentVersion)
+		}
+		time.Sleep(updateInterval)
+	}
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 func main() {
 	// Set up file logging
@@ -382,6 +592,7 @@ func main() {
 	// ── Step 4: Start background loops ────────────────────────────────────────
 	go configPoller()
 	go heartbeatLoop()
+	go updatePoller()
 
 	// ── Step 5: Command poll loop (blocks forever) ─────────────────────────────
 	commandLoop()
