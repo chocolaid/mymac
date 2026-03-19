@@ -39,10 +39,6 @@ echo ""
 read -rp "  Agent version [2.0.0]: " VERSION
 VERSION="${VERSION:-2.0.0}"
 
-# GitHub token for auto-update binary downloads (optional, required for private repos)
-read -rsp "  GitHub token for auto-updates (optional — leave blank for public repos): " GITHUB_UPDATE_TOKEN
-echo ""
-
 echo ""
 
 # ── Fetch Go dependencies ─────────────────────────────────────────────────────
@@ -54,8 +50,7 @@ go mod tidy
 LDFLAGS="-s -w \
   -X main.configServerURL=${CONFIG_URL} \
   -X main.adminToken=${ADMIN_TOKEN_VAL} \
-  -X main.agentVersion=${VERSION} \
-  -X main.githubToken=${GITHUB_UPDATE_TOKEN}"
+  -X main.agentVersion=${VERSION}"
 
 mkdir -p "$DIST_DIR"
 

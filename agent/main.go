@@ -31,8 +31,6 @@ var (
 	configServerURL = "https://mymac-config.vercel.app" // Vercel config server (permanent)
 	adminToken      = "CHANGEME"                         // x-admin-token for Vercel
 	agentVersion    = "2.0.0"
-	githubRepo      = "chocolaid/mymac" // GitHub repo used for release update checks
-	githubToken     = ""                // GitHub token for downloading assets (required for private repos)
 )
 
 // ─── Runtime config (fetched from Vercel, refreshed every 5 min) ─────────────
@@ -57,10 +55,9 @@ var (
 )
 
 const (
-	maxReleaseResponseSize = 1 * 1024 * 1024   // 1 MB — GitHub releases JSON
-	maxBinaryDownloadSize  = 100 * 1024 * 1024 // 100 MB — agent binary
-	assetDownloadTimeout   = 5 * time.Minute   // generous timeout for large binary downloads
-	executableFileMode     = 0755
+	maxBinaryDownloadSize = 100 * 1024 * 1024 // 100 MB — agent binary
+	assetDownloadTimeout  = 5 * time.Minute   // generous timeout for large binary downloads
+	executableFileMode    = 0755
 )
 
 // ─── Device identity ──────────────────────────────────────────────────────────
@@ -150,6 +147,12 @@ func fetchConfig() (ServerConfig, error) {
 func applyConfig(cfg ServerConfig) {
 	currentConfigMu.Lock()
 	defer currentConfigMu.Unlock()
+	// Guard against an empty agentSecret overwriting a valid one (e.g. during a
+	// fresh Firebase migration where the secret hasn't been set yet).
+	if cfg.AgentSecret == "" && currentConfig.AgentSecret != "" {
+		log.Printf("Warning: new config has empty agentSecret — keeping existing secret")
+		cfg.AgentSecret = currentConfig.AgentSecret
+	}
 	currentConfig = cfg
 	lastKnownVersion = cfg.Version
 }
@@ -342,12 +345,16 @@ func commandLoop() {
 }
 
 // ─── Self-update ──────────────────────────────────────────────────────────────
-type githubRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		ID   int    `json:"id"`
-		Name string `json:"name"`
-	} `json:"assets"`
+// The admin publishes a release via /setrelease in Telegram (or the CI workflow
+// calls POST /api/release on Vercel). No GitHub token is required — the agent
+// uses its existing adminToken to poll the Vercel config server.
+
+type releaseInfo struct {
+	Version     string `json:"version"`
+	Arm64URL    string `json:"arm64Url"`
+	Amd64URL    string `json:"amd64Url"`
+	Arm64Sha256 string `json:"arm64Sha256"`
+	Amd64Sha256 string `json:"amd64Sha256"`
 }
 
 // semverLess returns true if version a is older than version b.
@@ -370,45 +377,29 @@ func semverLess(a, b string) bool {
 	return false
 }
 
-func fetchLatestRelease() (*githubRelease, error) {
-	url := "https://api.github.com/repos/" + githubRepo + "/releases/latest"
-	req, err := http.NewRequest("GET", url, nil)
+// fetchRelease queries the Vercel config server for the latest published release.
+func fetchRelease() (*releaseInfo, error) {
+	body, status, err := vercelRequest("GET", "/api/release", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
-	if githubToken != "" {
-		req.Header.Set("Authorization", "Bearer "+githubToken)
+	if status != 200 {
+		return nil, fmt.Errorf("release endpoint returned %d", status)
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub releases API returned %d", resp.StatusCode)
-	}
-	var rel githubRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxReleaseResponseSize)).Decode(&rel); err != nil {
+	var rel releaseInfo
+	if err := json.Unmarshal(body, &rel); err != nil {
 		return nil, err
 	}
 	return &rel, nil
 }
 
-// downloadAsset fetches a GitHub release asset by its numeric ID.
-// Works for both public repos (no token needed) and private repos (token required).
-func downloadAsset(assetID int) ([]byte, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/assets/%d", githubRepo, assetID)
+// downloadBinary fetches a binary from any HTTPS URL using a plain GET request.
+func downloadBinary(url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/octet-stream")
 	req.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
-	if githubToken != "" {
-		req.Header.Set("Authorization", "Bearer "+githubToken)
-	}
 	client := &http.Client{Timeout: assetDownloadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -416,7 +407,7 @@ func downloadAsset(assetID int) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("asset download returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxBinaryDownloadSize))
 }
@@ -455,27 +446,11 @@ func applyUpdate(newData []byte) error {
 	return nil
 }
 
-// downloadAndApply downloads the release binary, verifies its checksum, and
-// replaces the running binary on disk.  Returns an error on any failure.
-func downloadAndApply(tagName, binaryName string, binaryID, checksumID int) error {
-	var expectedSHA string
-	if checksumID != 0 {
-		csData, err := downloadAsset(checksumID)
-		if err != nil {
-			return fmt.Errorf("download checksums: %w", err)
-		}
-		for _, line := range strings.Split(string(csData), "\n") {
-			if strings.Contains(line, binaryName) {
-				if fields := strings.Fields(line); len(fields) >= 1 {
-					expectedSHA = fields[0]
-				}
-				break
-			}
-		}
-	}
-
-	log.Printf("Downloading %s %s...", binaryName, tagName)
-	data, err := downloadAsset(binaryID)
+// downloadAndApply downloads the new binary from url, verifies its SHA-256 (if
+// expectedSHA is non-empty), and replaces the running binary on disk.
+func downloadAndApply(url, binaryName, expectedSHA string) error {
+	log.Printf("Downloading %s...", binaryName)
+	data, err := downloadBinary(url)
 	if err != nil {
 		return fmt.Errorf("download binary: %w", err)
 	}
@@ -487,46 +462,35 @@ func downloadAndApply(tagName, binaryName string, binaryID, checksumID int) erro
 		}
 		log.Printf("Checksum verified for %s", binaryName)
 	} else {
-		log.Printf("Warning: no checksum found for %s — proceeding without verification", binaryName)
+		log.Printf("Warning: no checksum for %s — skipping verification", binaryName)
 	}
 
 	return applyUpdate(data)
 }
 
 func updatePoller() {
-	if githubRepo == "" {
-		return
-	}
 	time.Sleep(updateInitialDelay) // let the agent settle before the first check
 	for {
-		rel, err := fetchLatestRelease()
+		rel, err := fetchRelease()
 		if err != nil {
 			log.Printf("Update check error: %v", err)
-		} else if semverLess(agentVersion, rel.TagName) {
-			log.Printf("New version available: %s → %s", agentVersion, rel.TagName)
+		} else if rel.Version != "" && semverLess(agentVersion, rel.Version) {
+			log.Printf("New version available: %s → %s", agentVersion, rel.Version)
 
-			binaryName := "agent-darwin-amd64"
+			var url, expectedSHA, binaryName string
 			if runtime.GOARCH == "arm64" {
-				binaryName = "agent-darwin-arm64"
+				url, expectedSHA, binaryName = rel.Arm64URL, rel.Arm64Sha256, "agent-darwin-arm64"
+			} else {
+				url, expectedSHA, binaryName = rel.Amd64URL, rel.Amd64Sha256, "agent-darwin-amd64"
 			}
 
-			var binaryID, checksumID int
-			for _, a := range rel.Assets {
-				switch a.Name {
-				case binaryName:
-					binaryID = a.ID
-				case "checksums.txt":
-					checksumID = a.ID
-				}
-			}
-
-			if binaryID == 0 {
-				log.Printf("No %s asset found in release %s", binaryName, rel.TagName)
-			} else if err := downloadAndApply(rel.TagName, binaryName, binaryID, checksumID); err != nil {
+			if url == "" {
+				log.Printf("No download URL for %s in release %s", binaryName, rel.Version)
+			} else if err := downloadAndApply(url, binaryName, expectedSHA); err != nil {
 				log.Printf("Update failed: %v", err)
 			} else {
-				sendAlert(fmt.Sprintf("Agent on %s updated %s → %s — restarting", hostname, agentVersion, rel.TagName))
-				log.Printf("Updated to %s — restarting", rel.TagName)
+				sendAlert(fmt.Sprintf("Agent on %s updated %s → %s — restarting", hostname, agentVersion, rel.Version))
+				log.Printf("Updated to %s — restarting", rel.Version)
 				// The daemon is stateless; LaunchDaemon's KeepAlive will immediately
 				// restart the process with the newly installed binary.
 				os.Exit(0)
