@@ -2,8 +2,10 @@ name: Build & Release Mac Agent
 
 on:
   push:
+    branches:
+      - main          # build a new release on every commit to main
     tags:
-      - 'v*'   # trigger on: git tag v2.0.0 && git push --tags
+      - 'v*'          # also honour manual: git tag v2.0.0 && git push --tags
 
 permissions:
   contents: write
@@ -16,6 +18,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed to inspect existing tags
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # Triggered by a manual tag push – use it as-is
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            # Triggered by a branch push – auto-increment the patch number
+            LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            if [[ -z "$LATEST" ]]; then
+              LATEST="v0.0.0"
+            fi
+            IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+            NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git tag "$NEW_TAG"
+            git push origin "$NEW_TAG"
+            echo "tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -37,7 +62,7 @@ jobs:
             -ldflags="-s -w \
               -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
               -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
-              -X main.agentVersion=${{ github.ref_name }}" \
+              -X main.agentVersion=${{ steps.version.outputs.tag }}" \
             -trimpath \
             -o ../dist/agent-darwin-arm64 \
             .
@@ -53,7 +78,7 @@ jobs:
             -ldflags="-s -w \
               -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
               -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
-              -X main.agentVersion=${{ github.ref_name }}" \
+              -X main.agentVersion=${{ steps.version.outputs.tag }}" \
             -trimpath \
             -o ../dist/agent-darwin-amd64 \
             .
@@ -65,12 +90,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
           files: |
             dist/agent-darwin-arm64
             dist/agent-darwin-amd64
             dist/checksums.txt
           body: |
-            ## mymac agent ${{ github.ref_name }}
+            ## mymac agent ${{ steps.version.outputs.tag }}
 
             ### Installation
 
@@ -91,7 +117,7 @@ jobs:
         continue-on-error: true
         working-directory: ./dist
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
           REPO: ${{ github.repository }}
           CONFIG_SERVER_URL: ${{ secrets.CONFIG_SERVER_URL }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
