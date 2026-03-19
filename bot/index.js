@@ -106,6 +106,9 @@ bot.onText(/^\/help$/, (msg) => {
     `\`/config\` – show current config\n` +
     `\`/setserver <url>\` – update bot server URL\n` +
     `\`/setsecret <secret>\` – update agent secret\n\n` +
+    `*Releases (agent self-update):*\n` +
+    `\`/release\` – show published release\n` +
+    `\`/setrelease <ver> <arm64-url> [amd64-url]\` – publish new release\n\n` +
     `*Queue:*\n` +
     `\`/status\` – pending command counts\n` +
     `\`/clear\` – clear all queues`
@@ -170,6 +173,47 @@ bot.onText(/^\/setserver (.+)$/, async (msg, match) => {
     reply(msg.chat.id,
       `✅ Server URL updated:\n\`${url}\`\n\n` +
       `All agents will reconnect within ~5 min on their next config poll.`
+    );
+  } catch (e) {
+    reply(msg.chat.id, `Error: ${e.message}`);
+  }
+});
+
+// /setrelease <version> <arm64-url> [amd64-url]
+bot.onText(/^\/setrelease (.+)$/, async (msg, match) => {
+  if (!isAuthorized(msg)) return;
+  const parts = match[1].trim().split(/\s+/);
+  const [version, arm64Url, amd64Url] = parts;
+  if (!version || !arm64Url) {
+    return reply(msg.chat.id, 'Usage: `/setrelease <version> <arm64-url> [amd64-url]`');
+  }
+  try {
+    await configReq('POST', '/api/release', {
+      version,
+      arm64Url,
+      ...(amd64Url ? { amd64Url } : {}),
+    });
+    reply(msg.chat.id,
+      `✅ Release published: \`${version}\`\n` +
+      `arm64: \`${arm64Url}\`\n\n` +
+      `Agents will update within ~1 hour on their next check.`
+    );
+  } catch (e) {
+    reply(msg.chat.id, `Error: ${e.message}`);
+  }
+});
+
+// /release – show current published release
+bot.onText(/^\/release$/, async (msg) => {
+  if (!isAuthorized(msg)) return;
+  try {
+    const rel = await configReq('GET', '/api/release');
+    if (!rel.version) return reply(msg.chat.id, 'No release published yet. Use /setrelease.');
+    reply(msg.chat.id,
+      `*Current release:* \`${rel.version}\`\n` +
+      `arm64: \`${rel.arm64Url || '(not set)'}\`\n` +
+      `amd64: \`${rel.amd64Url || '(not set)'}\`\n` +
+      `Published: ${rel.publishedAt ?? 'unknown'}`
     );
   } catch (e) {
     reply(msg.chat.id, `Error: ${e.message}`);

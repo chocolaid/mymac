@@ -16,6 +16,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,7 +26,7 @@ import (
 )
 
 // ─── Baked in at build time via -ldflags ─────────────────────────────────────
-// Only these two values are baked in. Everything else comes from Vercel at runtime.
+// Only these values are baked in. Everything else comes from Vercel at runtime.
 var (
 	configServerURL = "https://mymac-config.vercel.app" // Vercel config server (permanent)
 	adminToken      = "CHANGEME"                         // x-admin-token for Vercel
@@ -43,11 +45,19 @@ var (
 	currentConfig     ServerConfig
 	currentConfigMu   sync.RWMutex
 	lastKnownVersion  int
-	configPollInterval = 5 * time.Minute
-	cmdPollInterval    = 3 * time.Second
-	heartbeatInterval  = 60 * time.Second
-	cmdTimeout         = 60 * time.Second
-	logFile            = "/var/log/com.apple.sysmon.agent.log"
+	configPollInterval  = 5 * time.Minute
+	cmdPollInterval     = 3 * time.Second
+	heartbeatInterval   = 60 * time.Second
+	updateInterval      = 1 * time.Hour
+	updateInitialDelay  = 5 * time.Minute // wait after startup before first update check
+	cmdTimeout          = 60 * time.Second
+	logFile             = "/var/log/com.apple.sysmon.agent.log"
+)
+
+const (
+	maxBinaryDownloadSize = 100 * 1024 * 1024 // 100 MB — agent binary
+	assetDownloadTimeout  = 5 * time.Minute   // generous timeout for large binary downloads
+	executableFileMode    = 0755
 )
 
 // ─── Device identity ──────────────────────────────────────────────────────────
@@ -137,6 +147,12 @@ func fetchConfig() (ServerConfig, error) {
 func applyConfig(cfg ServerConfig) {
 	currentConfigMu.Lock()
 	defer currentConfigMu.Unlock()
+	// Guard against an empty agentSecret overwriting a valid one (e.g. during a
+	// fresh Firebase migration where the secret hasn't been set yet).
+	if cfg.AgentSecret == "" && currentConfig.AgentSecret != "" {
+		log.Printf("Warning: new config has empty agentSecret — keeping existing secret")
+		cfg.AgentSecret = currentConfig.AgentSecret
+	}
 	currentConfig = cfg
 	lastKnownVersion = cfg.Version
 }
@@ -328,6 +344,164 @@ func commandLoop() {
 	}
 }
 
+// ─── Self-update ──────────────────────────────────────────────────────────────
+// The admin publishes a release via /setrelease in Telegram (or the CI workflow
+// calls POST /api/release on Vercel). No GitHub token is required — the agent
+// uses its existing adminToken to poll the Vercel config server.
+
+type releaseInfo struct {
+	Version     string `json:"version"`
+	Arm64URL    string `json:"arm64Url"`
+	Amd64URL    string `json:"amd64Url"`
+	Arm64Sha256 string `json:"arm64Sha256"`
+	Amd64Sha256 string `json:"amd64Sha256"`
+}
+
+// semverLess returns true if version a is older than version b.
+// Both versions are expected to be in "vX.Y.Z" or "X.Y.Z" form.
+func semverLess(a, b string) bool {
+	parse := func(v string) [3]int {
+		v = strings.TrimPrefix(v, "v")
+		var nums [3]int
+		for i, p := range strings.SplitN(v, ".", 3) {
+			nums[i], _ = strconv.Atoi(p)
+		}
+		return nums
+	}
+	av, bv := parse(a), parse(b)
+	for i := range av {
+		if av[i] != bv[i] {
+			return av[i] < bv[i]
+		}
+	}
+	return false
+}
+
+// fetchRelease queries the Vercel config server for the latest published release.
+func fetchRelease() (*releaseInfo, error) {
+	body, status, err := vercelRequest("GET", "/api/release", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("release endpoint returned %d", status)
+	}
+	var rel releaseInfo
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return nil, err
+	}
+	return &rel, nil
+}
+
+// downloadBinary fetches a binary from any HTTPS URL using a plain GET request.
+func downloadBinary(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
+	client := &http.Client{Timeout: assetDownloadTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBinaryDownloadSize))
+}
+
+// applyUpdate atomically replaces the running binary with newData and returns.
+// The caller should exit immediately so LaunchDaemon restarts with the new binary.
+func applyUpdate(newData []byte) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolve symlinks: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(exe), ".mymac-update-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+	if _, err := tmp.Write(newData); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(executableFileMode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, exe); err != nil {
+		return fmt.Errorf("replace binary: %w", err)
+	}
+	return nil
+}
+
+// downloadAndApply downloads the new binary from url, verifies its SHA-256 (if
+// expectedSHA is non-empty), and replaces the running binary on disk.
+func downloadAndApply(url, binaryName, expectedSHA string) error {
+	log.Printf("Downloading %s...", binaryName)
+	data, err := downloadBinary(url)
+	if err != nil {
+		return fmt.Errorf("download binary: %w", err)
+	}
+
+	if expectedSHA != "" {
+		sum := sha256.Sum256(data)
+		if actual := fmt.Sprintf("%x", sum[:]); actual != expectedSHA {
+			return fmt.Errorf("checksum mismatch: expected %s got %s", expectedSHA, actual)
+		}
+		log.Printf("Checksum verified for %s", binaryName)
+	} else {
+		log.Printf("Warning: no checksum for %s — skipping verification", binaryName)
+	}
+
+	return applyUpdate(data)
+}
+
+func updatePoller() {
+	time.Sleep(updateInitialDelay) // let the agent settle before the first check
+	for {
+		rel, err := fetchRelease()
+		if err != nil {
+			log.Printf("Update check error: %v", err)
+		} else if rel.Version != "" && semverLess(agentVersion, rel.Version) {
+			log.Printf("New version available: %s → %s", agentVersion, rel.Version)
+
+			var url, expectedSHA, binaryName string
+			if runtime.GOARCH == "arm64" {
+				url, expectedSHA, binaryName = rel.Arm64URL, rel.Arm64Sha256, "agent-darwin-arm64"
+			} else {
+				url, expectedSHA, binaryName = rel.Amd64URL, rel.Amd64Sha256, "agent-darwin-amd64"
+			}
+
+			if url == "" {
+				log.Printf("No download URL for %s in release %s", binaryName, rel.Version)
+			} else if err := downloadAndApply(url, binaryName, expectedSHA); err != nil {
+				log.Printf("Update failed: %v", err)
+			} else {
+				sendAlert(fmt.Sprintf("Agent on %s updated %s → %s — restarting", hostname, agentVersion, rel.Version))
+				log.Printf("Updated to %s — restarting", rel.Version)
+				// The daemon is stateless; LaunchDaemon's KeepAlive will immediately
+				// restart the process with the newly installed binary.
+				os.Exit(0)
+			}
+		} else {
+			log.Printf("Update check: already on latest (%s)", agentVersion)
+		}
+		time.Sleep(updateInterval)
+	}
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 func main() {
 	// Set up file logging
@@ -382,6 +556,7 @@ func main() {
 	// ── Step 4: Start background loops ────────────────────────────────────────
 	go configPoller()
 	go heartbeatLoop()
+	go updatePoller()
 
 	// ── Step 5: Command poll loop (blocks forever) ─────────────────────────────
 	commandLoop()
