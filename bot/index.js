@@ -495,7 +495,7 @@ bot.hears(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
 async function broadcast(chatId, cmd, label, type) {
   const devices = await getDevices();
   if (!devices.length) return reply(chatId, 'No devices registered yet.');
-  console.log(`[broadcast] cmd="${label}" type=${type ?? 'text'} targets=${devices.map(d => d.hostname).join(', ')}`);
+  console.log(`[broadcast] cmdalso the image is giving me="${label}" type=${type ?? 'text'} targets=${devices.map(d => d.hostname).join(', ')}`);
   reply(chatId, `📡 Broadcasting to *${devices.length}* Mac(s):\n\`\`\`\n${label}\n\`\`\``);
   for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd, type);
 }
@@ -519,12 +519,16 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
 
       if (type === 'screenshot' && exitCode === 0 && output.trim().length > 0) {
         // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
-        const b64 = output.replace(/\s/g, '');
+        const b64raw = output.replace(/\s/g, '');
+        // Re-pad to a multiple of 4 — Buffer.from is lenient but silently
+        // truncates the last bytes when padding is missing, producing a corrupt
+        // JPEG that Telegram rejects with IMAGE_PROCESS_FAILED.
+        const b64 = b64raw + '='.repeat((4 - (b64raw.length % 4)) % 4);
         const buf = Buffer.from(b64, 'base64');
-        console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} b64Chars=${b64.length} bufBytes=${buf.length} chatId=${chatId} — calling bot.telegram.sendPhoto`);
+        console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} b64Raw=${b64raw.length} b64Padded=${b64.length} bufBytes=${buf.length} chatId=${chatId} — calling bot.telegram.sendPhoto`);
         bot.telegram.sendPhoto(
           chatId,
-          { source: buf },
+          { source: buf, filename: 'screenshot.jpg' },
           { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
         ).then(() => {
           console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto OK`);
@@ -539,7 +543,8 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
             `  tg_desc:     ${tgDesc}\n` +
             `  tg_params:   ${tgParams}\n` +
             `  buf_bytes:   ${buf.length}\n` +
-            `  b64_chars:   ${b64.length}\n` +
+            `  b64_padded:  ${b64.length}\n` +
+            `  b64_raw:     ${b64raw.length}\n` +
             `  chatId:      ${chatId}\n` +
             `  stack:\n${err.stack}`
           );
