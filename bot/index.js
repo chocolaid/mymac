@@ -1,4 +1,7 @@
 require('dotenv').config();
+const fs  = require('fs');
+const os  = require('os');
+const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const helmet = require('helmet');
@@ -341,17 +344,26 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
         // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
         const b64 = output.replace(/\s/g, '');
         const buf = Buffer.from(b64, 'base64');
-        // Use { source } form so node-telegram-bot-api sends the correct
-        // content-type (image/jpeg). Passing a raw Buffer as the 2nd arg with
-        // file options in the 4th arg is deprecated since 0.61 and causes
-        // Telegram to return IMAGE_PROCESS_FAILED.
-        bot.sendPhoto(
-          chatId,
-          { source: buf, filename: 'screenshot.jpg', contentType: 'image/jpeg' },
-          { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
-        ).catch((err) => {
-          console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
-          reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
+        // Write to a temp file and send as a ReadStream.
+        // This guarantees multipart/form-data upload via the Telegram API:
+        // passing a raw Buffer or { source } causes node-telegram-bot-api v0.66
+        // to URL-encode the binary data, producing a request URI so large that
+        // nginx returns 414 Request-URI Too Large.
+        const tmpFile = path.join(os.tmpdir(), `sc_${id}.jpg`);
+        fs.writeFile(tmpFile, buf, (writeErr) => {
+          if (writeErr) {
+            console.error(`[bot] writeFile failed for ${hostname}:`, writeErr.message);
+            reply(chatId, `📋 *${hostname}* — screenshot failed: ${writeErr.message}`);
+            return;
+          }
+          bot.sendPhoto(
+            chatId,
+            fs.createReadStream(tmpFile),
+            { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
+          ).catch((err) => {
+            console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
+            reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
+          }).finally(() => fs.unlink(tmpFile, () => {}));
         });
         return;
       }
