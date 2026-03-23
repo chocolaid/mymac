@@ -113,6 +113,10 @@ cat > "$PLIST_PATH" <<PLIST
 
   <key>ProgramArguments</key>
   <array>
+    <!-- caffeinate -is: prevent idle sleep (-i) and system sleep on AC (-s)
+         so the agent stays reachable while the Mac is plugged in.          -->
+    <string>/usr/bin/caffeinate</string>
+    <string>-is</string>
     <string>${BINARY_PATH}</string>
   </array>
 
@@ -164,6 +168,13 @@ if launchctl list "$AGENT_LABEL" &>/dev/null 2>&1; then
   launchctl unload "$PLIST_PATH" 2>/dev/null || true
   sleep 1
 fi
+
+# ── Sleep / wake settings ────────────────────────────────────────────────────
+info "Enabling Power Nap (wake for network activity during sleep)..."
+pmset -a powernap 1  2>/dev/null || true
+info "Enabling Wake on LAN (wake via magic packet on same network)..."
+pmset -a womp 1      2>/dev/null || true
+success "Power Nap and Wake on LAN enabled."
 
 # ── Load and start the daemon ─────────────────────────────────────────────────
 info "Loading LaunchDaemon (starts now and on every boot)..."

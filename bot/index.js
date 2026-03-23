@@ -142,6 +142,15 @@ bot.onText(/^\/help$/, (msg) => {
     `*Power:*\n` +
     `\`/restart\` – restart\n` +
     `\`/shutdown\` – shutdown\n\n` +
+    `*Sleep / wake:*\n` +
+    `\`/powersettings\` – show all pmset settings\n` +
+    `\`/lastwake\` – recent wake/sleep events\n` +
+    `\`/wakeschedule\` – list scheduled wakes\n` +
+    `\`/cancelwake\` – cancel all scheduled wakes\n` +
+    `\`/enablepowernap\` – wake for network during sleep\n` +
+    `\`/enablewol\` – enable Wake on LAN\n` +
+    `\`/setwake [@host] MM/DD/YY HH:MM:SS\` – schedule one-time wake\n` +
+    `\`/stayawake [@host] <seconds>\` – prevent sleep for N seconds\n\n` +
     `*Devices:*\n` +
     `\`/devices\` – list all Macs with status\n` +
     `\`/forget @<hostname>\` – remove a device\n\n` +
@@ -378,6 +387,14 @@ const SHORTCUTS = {
   // Power
   '/restart':       { cmd: 'shutdown -r now' },
   '/shutdown':      { cmd: 'shutdown -h now' },
+
+  // Sleep / wake persistence
+  '/powersettings': { cmd: 'pmset -g' },
+  '/lastwake':      { cmd: 'pmset -g log | grep -E "Wake|Sleep" | tail -20' },
+  '/wakeschedule':  { cmd: 'pmset -g sched' },
+  '/cancelwake':    { cmd: 'pmset schedule cancelall' },
+  '/enablepowernap':{ cmd: 'pmset -a powernap 1' },
+  '/enablewol':     { cmd: 'pmset -a womp 1' },
 };
 
 Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
@@ -385,6 +402,38 @@ Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
     if (!isAuthorized(msg)) return;
     await broadcast(msg.chat.id, cmd, trigger, type);
   });
+});
+
+// /setwake [@hostname] MM/DD/YY HH:MM:SS  – schedule a one-time wake
+bot.onText(/^\/setwake(?: @?([\w.-]+))? (\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})$/, async (msg, match) => {
+  if (!isAuthorized(msg)) return;
+  const target   = match[1];
+  const dateStr  = match[2].trim();
+  const cmd      = `pmset schedule wakeorpoweron "${dateStr}"`;
+  const chatId   = msg.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/setwake ${dateStr}`);
+  }
+});
+
+// /stayawake [@hostname] <seconds>  – caffeinate for N seconds
+bot.onText(/^\/stayawake(?: @?([\w.-]+))?(?: (\d+))?$/, async (msg, match) => {
+  if (!isAuthorized(msg)) return;
+  const target = match[1];
+  const secs   = parseInt(match[2] ?? '3600');
+  const cmd    = `caffeinate -t ${secs} &`;
+  const chatId = msg.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/stayawake ${secs}s`);
+  }
 });
 
 // /run [@hostname] <cmd>

@@ -39,6 +39,21 @@ const system = {
   restart:  () => 'shutdown -r now',
   shutdown: () => 'shutdown -h now',
 
+  // ── Sleep / wake persistence ──────────────────────────────────────────────────
+  powerSettings:      () => 'pmset -g',
+  enablePowerNap:     () => 'pmset -a powernap 1',
+  disablePowerNap:    () => 'pmset -a powernap 0',
+  enableWoL:          () => 'pmset -a womp 1',
+  disableWoL:         () => 'pmset -a womp 0',
+  // Schedule a one-time wake. date must be in format: MM/DD/YY HH:MM:SS
+  scheduleWake:       (date) => `pmset schedule wakeorpoweron "${date}"`,
+  listWakeSchedule:   () => 'pmset -g sched',
+  cancelWakeSchedule: () => 'pmset schedule cancelall',
+  // Show what last woke the machine
+  lastWake:           () => 'pmset -g log | grep -E "Wake|Sleep" | tail -20',
+  // Keep awake for N seconds (fires in background — agent stays responsive)
+  stayAwake:          (secs = 3600) => `caffeinate -t ${parseInt(secs)} &`,
+
   // ── Screen ───────────────────────────────────────────────────────────────────
   lockScreen:  () =>
     `osascript -e 'tell application "System Events" to keystroke "q" using {command down, control down}'`,
