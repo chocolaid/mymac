@@ -31,6 +31,7 @@ var (
 	configServerURL = "https://mymac-config.vercel.app" // Vercel config server (permanent)
 	adminToken      = "CHANGEME"                         // x-admin-token for Vercel
 	agentVersion    = "2.0.0"
+	githubRepo      = ""                                 // e.g. "yourname/mymac" — primary update source
 )
 
 // ─── Runtime config (fetched from Vercel, refreshed every 5 min) ─────────────
@@ -392,8 +393,87 @@ func semverLess(a, b string) bool {
 	return false
 }
 
-// fetchRelease queries the Vercel config server for the latest published release.
+// fetchReleaseFromGitHub queries the GitHub Releases API for the latest release.
+// It resolves download URLs from the release assets and parses checksums.txt.
+// Works for public repos without a token.
+func fetchReleaseFromGitHub() (*releaseInfo, error) {
+	if githubRepo == "" {
+		return nil, fmt.Errorf("githubRepo not set")
+	}
+	apiURL := "https://api.github.com/repos/" + githubRepo + "/releases/latest"
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+	var ghResp struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+	if err := json.Unmarshal(body, &ghResp); err != nil {
+		return nil, err
+	}
+	if ghResp.TagName == "" {
+		return nil, fmt.Errorf("GitHub: no releases found")
+	}
+	rel := &releaseInfo{Version: ghResp.TagName}
+	var checksumURL string
+	for _, a := range ghResp.Assets {
+		switch a.Name {
+		case "agent-darwin-arm64":
+			rel.Arm64URL = a.BrowserDownloadURL
+		case "agent-darwin-amd64":
+			rel.Amd64URL = a.BrowserDownloadURL
+		case "checksums.txt":
+			checksumURL = a.BrowserDownloadURL
+		}
+	}
+	// Parse checksums.txt if available
+	if checksumURL != "" {
+		cReq, _ := http.NewRequest("GET", checksumURL, nil)
+		cReq.Header.Set("User-Agent", "mymac-agent/"+agentVersion)
+		cResp, err := client.Do(cReq)
+		if err == nil && cResp.StatusCode == 200 {
+			cData, _ := io.ReadAll(io.LimitReader(cResp.Body, 4096))
+			cResp.Body.Close()
+			for _, line := range strings.Split(string(cData), "\n") {
+				if strings.Contains(line, "agent-darwin-arm64") {
+					rel.Arm64Sha256 = strings.Fields(line)[0]
+				} else if strings.Contains(line, "agent-darwin-amd64") {
+					rel.Amd64Sha256 = strings.Fields(line)[0]
+				}
+			}
+		}
+	}
+	return rel, nil
+}
+
+// fetchRelease checks GitHub releases first (direct, always up to date);
+// falls back to the Vercel config server if GitHub is unavailable or not configured.
 func fetchRelease() (*releaseInfo, error) {
+	if githubRepo != "" {
+		rel, err := fetchReleaseFromGitHub()
+		if err != nil {
+			log.Printf("GitHub release check failed (%v) — falling back to Vercel", err)
+		} else {
+			return rel, nil
+		}
+	}
+	// Vercel fallback
 	body, status, err := vercelRequest("GET", "/api/release", nil)
 	if err != nil {
 		return nil, err

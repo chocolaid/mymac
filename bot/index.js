@@ -341,14 +341,14 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
         // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
         const b64 = output.replace(/\s/g, '');
         const buf = Buffer.from(b64, 'base64');
-        // fileOptions (4th arg) are required when sending a Buffer — without them
-        // node-telegram-bot-api doesn't declare a content type and Telegram returns
-        // IMAGEPROCESSFAILED.
+        // Use { source } form so node-telegram-bot-api sends the correct
+        // content-type (image/jpeg). Passing a raw Buffer as the 2nd arg with
+        // file options in the 4th arg is deprecated since 0.61 and causes
+        // Telegram to return IMAGE_PROCESS_FAILED.
         bot.sendPhoto(
           chatId,
-          buf,
+          { source: buf, filename: 'screenshot.jpg', contentType: 'image/jpeg' },
           { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
-          { filename: 'screenshot.jpg', contentType: 'image/jpeg' },
         ).catch((err) => {
           console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
           reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);

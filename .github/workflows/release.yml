@@ -62,7 +62,8 @@ jobs:
             -ldflags="-s -w \
               -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
               -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
-              -X main.agentVersion=${{ steps.version.outputs.tag }}" \
+              -X main.agentVersion=${{ steps.version.outputs.tag }} \
+              -X main.githubRepo=${{ github.repository }}" \
             -trimpath \
             -o ../dist/agent-darwin-arm64 \
             .
@@ -78,7 +79,8 @@ jobs:
             -ldflags="-s -w \
               -X main.configServerURL=${{ secrets.CONFIG_SERVER_URL }} \
               -X main.adminToken=${{ secrets.ADMIN_TOKEN }} \
-              -X main.agentVersion=${{ steps.version.outputs.tag }}" \
+              -X main.agentVersion=${{ steps.version.outputs.tag }} \
+              -X main.githubRepo=${{ github.repository }}" \
             -trimpath \
             -o ../dist/agent-darwin-amd64 \
             .
@@ -114,7 +116,6 @@ jobs:
           prerelease: false
 
       - name: Publish release info to Vercel config server
-        continue-on-error: true
         working-directory: ./dist
         env:
           TAG: ${{ steps.version.outputs.tag }}

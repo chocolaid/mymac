@@ -8,3 +8,4 @@ agent/com.apple.sysmon.agent
 agent/mymac-agent
 *.log
 *.err
+.build-config
