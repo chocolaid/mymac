@@ -518,38 +518,74 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
       console.log(`[result] id=${id.slice(0,8)} host=${hostname} exit=${exitCode} outputBytes=${output.length}`);
 
       if (type === 'screenshot' && exitCode === 0 && output.trim().length > 0) {
-        // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
-        const b64raw = output.replace(/\s/g, '');
-        // Re-pad to a multiple of 4 — Buffer.from is lenient but silently
-        // truncates the last bytes when padding is missing, producing a corrupt
-        // JPEG that Telegram rejects with IMAGE_PROCESS_FAILED.
+        // Strip everything that is not a valid base64 character (A-Z a-z 0-9 + / =).
+        // A plain \s strip leaves behind any non-printable / non-ASCII bytes that
+        // Buffer.from silently discards, producing a truncated corrupt JPEG.
+        const b64raw = output.replace(/[^A-Za-z0-9+/=]/g, '');
+        // Re-pad to a multiple of 4.
         const b64 = b64raw + '='.repeat((4 - (b64raw.length % 4)) % 4);
         const buf = Buffer.from(b64, 'base64');
-        console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} b64Raw=${b64raw.length} b64Padded=${b64.length} bufBytes=${buf.length} chatId=${chatId} — calling bot.telegram.sendPhoto`);
-        bot.telegram.sendPhoto(
+
+        // Validate JPEG magic bytes (FF D8 FF) so we know the decode is sane.
+        const magic = buf.slice(0, 4).toString('hex');
+        const tail  = buf.slice(-4).toString('hex');
+        const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+        console.log(
+          `[screenshot] id=${id.slice(0,8)} host=${hostname}` +
+          ` b64Raw=${b64raw.length} b64Padded=${b64.length} bufBytes=${buf.length}` +
+          ` magic=${magic} tail=${tail} validJpeg=${isJpeg} chatId=${chatId}`
+        );
+
+        if (!isJpeg) {
+          console.error(`[screenshot] id=${id.slice(0,8)} host=${hostname} — INVALID JPEG header (${magic}), aborting sendPhoto`);
+          reply(chatId, `📋 *${hostname}* — screenshot decode failed: bad JPEG header \`${magic}\` (bufBytes=${buf.length})`);
+          return;
+        }
+
+        // sendPhoto lets Telegram process the image; if it rejects (IMAGE_PROCESS_FAILED),
+        // fall back to sendDocument which delivers the raw file without processing.
+        const sendAsPhoto = () => bot.telegram.sendPhoto(
           chatId,
-          { source: buf, filename: 'screenshot.jpg' },
+          { source: Buffer.from(buf), filename: 'screenshot.jpg' },
           { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
-        ).then(() => {
-          console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto OK`);
-        }).catch((err) => {
-          const tgCode    = err.response?.error_code  ?? 'n/a';
-          const tgDesc    = err.response?.description ?? 'n/a';
-          const tgParams  = JSON.stringify(err.response?.parameters ?? {});
-          console.error(
-            `[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto FAILED\n` +
-            `  message:     ${err.message}\n` +
-            `  tg_code:     ${tgCode}\n` +
-            `  tg_desc:     ${tgDesc}\n` +
-            `  tg_params:   ${tgParams}\n` +
-            `  buf_bytes:   ${buf.length}\n` +
-            `  b64_padded:  ${b64.length}\n` +
-            `  b64_raw:     ${b64raw.length}\n` +
-            `  chatId:      ${chatId}\n` +
-            `  stack:\n${err.stack}`
+        );
+
+        const sendAsDocument = (reason) => {
+          console.warn(`[screenshot] id=${id.slice(0,8)} host=${hostname} — falling back to sendDocument (reason: ${reason})`);
+          return bot.telegram.sendDocument(
+            chatId,
+            { source: Buffer.from(buf), filename: 'screenshot.jpg' },
+            { caption: `📸 *${hostname}* (sent as file — ${reason})`, parse_mode: 'Markdown' },
           );
-          reply(chatId, `📋 *${hostname}* — screenshot failed\n\`tg_code ${tgCode}: ${tgDesc}\`\nbuf: ${buf.length} bytes`);
-        });
+        };
+
+        sendAsPhoto()
+          .then(() => console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto OK`))
+          .catch((err) => {
+            const tgCode = err.response?.error_code  ?? 'n/a';
+            const tgDesc = err.response?.description ?? 'n/a';
+            console.error(
+              `[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto FAILED\n` +
+              `  message:    ${err.message}\n` +
+              `  tg_code:    ${tgCode}\n` +
+              `  tg_desc:    ${tgDesc}\n` +
+              `  buf_bytes:  ${buf.length}\n` +
+              `  b64_padded: ${b64.length}\n` +
+              `  b64_raw:    ${b64raw.length}\n` +
+              `  magic:      ${magic}  tail: ${tail}\n` +
+              `  stack:\n${err.stack}`
+            );
+            if (tgDesc.includes('IMAGE_PROCESS_FAILED') || tgCode === 400) {
+              sendAsDocument(`tg: ${tgDesc}`)
+                .then(() => console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} — sendDocument fallback OK`))
+                .catch((e2) => {
+                  console.error(`[screenshot] id=${id.slice(0,8)} host=${hostname} — sendDocument fallback FAILED: ${e2.message}`);
+                  reply(chatId, `📋 *${hostname}* — screenshot failed (photo + document both failed)\n\`${tgCode}: ${tgDesc}\`\nbuf: ${buf.length} bytes`);
+                });
+            } else {
+              reply(chatId, `📋 *${hostname}* — screenshot failed\n\`tg_code ${tgCode}: ${tgDesc}\`\nbuf: ${buf.length} bytes`);
+            }
+          });
         return;
       }
 
