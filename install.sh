@@ -46,7 +46,10 @@ echo -e "  Architecture: ${CYAN}${ARCH}${RESET} → binary: ${CYAN}agent-darwin-
 echo -e "  Download URL: ${CYAN}${BINARY_URL}${RESET}\n"
 
 # GitHub personal access token (required — repo is private)
-read -rp "  GitHub token (repo scope — generate at github.com/settings/tokens): " GH_TOKEN
+# Accept from env (non-interactive/bot reinstall) or prompt interactively.
+if [[ -z "${GH_TOKEN:-}" ]]; then
+  read -rp "  GitHub token (repo scope — generate at github.com/settings/tokens): " GH_TOKEN
+fi
 [[ -n "$GH_TOKEN" ]] || die "GitHub token required (repo is private)."
 
 echo ""

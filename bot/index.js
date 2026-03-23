@@ -1,5 +1,5 @@
 require('dotenv').config();
-const TelegramBot = require('node-telegram-bot-api');
+const { Telegraf } = require('telegraf');
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -30,12 +30,12 @@ let devicesCache   = [];
 let devicesCacheAt = 0;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function isAuthorized(msg) {
-  return String(msg.chat.id) === String(ALLOWED_CHAT_ID);
+function isAuthorized(ctx) {
+  return String(ctx.chat.id) === String(ALLOWED_CHAT_ID);
 }
 
 function reply(chatId, text, extra = {}) {
-  return bot.sendMessage(chatId, text, { parse_mode: 'Markdown', ...extra });
+  return bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...extra });
 }
 
 // ─── Vercel config-server helpers ─────────────────────────────────────────────
@@ -72,13 +72,13 @@ function onlineStatus(device) {
   return age < 90_000 ? '🟢' : age < 300_000 ? '🟡' : '🔴';
 }
 
-// ─── Telegram Bot ─────────────────────────────────────────────────────────────
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+// ─── Telegram Bot (Telegraf) ──────────────────────────────────────────────────
+const bot = new Telegraf(TELEGRAM_TOKEN);
 
 // /start
-bot.onText(/^\/start$/, (msg) => {
-  if (!isAuthorized(msg)) return;
-  reply(msg.chat.id,
+bot.command('start', (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  reply(ctx.chat.id,
     `*mymac admin*\n\nControl all your Macs remotely.\n\n` +
     `• \`/devices\` – list all Macs\n` +
     `• \`/run <cmd>\` – broadcast to all Macs\n` +
@@ -90,9 +90,9 @@ bot.onText(/^\/start$/, (msg) => {
 });
 
 // /help
-bot.onText(/^\/help$/, (msg) => {
-  if (!isAuthorized(msg)) return;
-  reply(msg.chat.id,
+bot.command('help', (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  reply(ctx.chat.id,
     `*Commands*\n\n` +
     `*Run raw shell:*\n` +
     `\`/run <cmd>\` – broadcast to all Macs\n` +
@@ -161,7 +161,8 @@ bot.onText(/^\/help$/, (msg) => {
     `*Releases (agent self-update):*\n` +
     `\`/release\` – show published release\n` +
     `\`/setrelease <ver> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]\`\n` +
-    `\`/update [@hostname]\` – force immediate update check\n\n` +
+    `\`/update [@hostname]\` – force immediate update check\n` +
+    `\`/reinstall [@hostname] <gh-token>\` – full fresh reinstall of daemon\n\n` +
     `*Queue:*\n` +
     `\`/status\` – pending command counts\n` +
     `\`/clear\` – clear all queues`
@@ -169,9 +170,9 @@ bot.onText(/^\/help$/, (msg) => {
 });
 
 // /devices
-bot.onText(/^\/devices$/, async (msg) => {
-  if (!isAuthorized(msg)) return;
-  const chatId = msg.chat.id;
+bot.command('devices', async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const chatId = ctx.chat.id;
   try {
     const devices = await getDevices(true);
     if (!devices.length) return reply(chatId, 'No devices registered yet.');
@@ -190,22 +191,23 @@ bot.onText(/^\/devices$/, async (msg) => {
 });
 
 // /forget @hostname
-bot.onText(/^\/forget @?(\S+)$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
+bot.hears(/^\/forget @?(\S+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const match = ctx.match;
   const device = await resolveDevice(match[1].trim());
-  if (!device) return reply(msg.chat.id, `Device \`${match[1]}\` not found.`);
+  if (!device) return reply(ctx.chat.id, `Device \`${match[1]}\` not found.`);
   await configReq('POST', '/api/devices/remove', { deviceId: device.deviceId });
   delete deviceQueues[device.deviceId];
   await getDevices(true);
-  reply(msg.chat.id, `✅ Removed: *${device.hostname}*`);
+  reply(ctx.chat.id, `✅ Removed: *${device.hostname}*`);
 });
 
 // /config
-bot.onText(/^\/config$/, async (msg) => {
-  if (!isAuthorized(msg)) return;
+bot.command('config', async (ctx) => {
+  if (!isAuthorized(ctx)) return;
   try {
     const cfg = await configReq('GET', '/api/config');
-    reply(msg.chat.id,
+    reply(ctx.chat.id,
       `*Server config* (v${cfg.version ?? '?'})\n` +
       `URL: \`${cfg.serverUrl || '(not set)'}\`\n` +
       `Secret: \`${cfg.agentSecret ? cfg.agentSecret.slice(0, 8) + '…' : '(not set)'}\`\n` +
@@ -213,32 +215,32 @@ bot.onText(/^\/config$/, async (msg) => {
       `Use /setserver and /setsecret to change.`
     );
   } catch (e) {
-    reply(msg.chat.id, `Error: ${e.message}`);
+    reply(ctx.chat.id, `Error: ${e.message}`);
   }
 });
 
 // /setserver <url>
-bot.onText(/^\/setserver (.+)$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const url = match[1].trim().replace(/\/$/, '');
+bot.hears(/^\/setserver (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const url = ctx.match[1].trim().replace(/\/$/, '');
   try {
     await configReq('POST', '/api/config', { serverUrl: url });
-    reply(msg.chat.id,
+    reply(ctx.chat.id,
       `✅ Server URL updated:\n\`${url}\`\n\n` +
       `All agents will reconnect within ~5 min on their next config poll.`
     );
   } catch (e) {
-    reply(msg.chat.id, `Error: ${e.message}`);
+    reply(ctx.chat.id, `Error: ${e.message}`);
   }
 });
 
 // /setrelease <version> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]
-bot.onText(/^\/setrelease (.+)$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const parts = match[1].trim().split(/\s+/);
+bot.hears(/^\/setrelease (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const parts = ctx.match[1].trim().split(/\s+/);
   const [version, arm64Url, amd64Url, arm64Sha256, amd64Sha256] = parts;
   if (!version || !arm64Url) {
-    return reply(msg.chat.id,
+    return reply(ctx.chat.id,
       'Usage: `/setrelease <version> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]`'
     );
   }
@@ -251,21 +253,21 @@ bot.onText(/^\/setrelease (.+)$/, async (msg, match) => {
       ...(amd64Sha256 ? { amd64Sha256 } : {}),
     });
     const shaNote = arm64Sha256 ? `\narm64 sha256: \`${arm64Sha256.slice(0, 12)}…\`` : ' _(no checksum — less secure)_';
-    reply(msg.chat.id,
+    reply(ctx.chat.id,
       `✅ Release published: \`${version}\`\n` +
       `arm64: \`${arm64Url}\`${shaNote}\n\n` +
       `Agents will update within ~1 hour, or immediately via /update.`
     );
   } catch (e) {
-    reply(msg.chat.id, `Error: ${e.message}`);
+    reply(ctx.chat.id, `Error: ${e.message}`);
   }
 });
 
 // /update [@hostname] – force immediate update check on one or all agents
-bot.onText(/^\/update(?: @?([\w.-]+))?$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const target = match[1];
-  const chatId = msg.chat.id;
+bot.hears(/^\/update(?: @?([\w.-]+))?$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const chatId = ctx.chat.id;
   const cmd = '__update__';
   if (target) {
     const device = await resolveDevice(target);
@@ -281,55 +283,55 @@ bot.onText(/^\/update(?: @?([\w.-]+))?$/, async (msg, match) => {
 });
 
 // /release – show current published release
-bot.onText(/^\/release$/, async (msg) => {
-  if (!isAuthorized(msg)) return;
+bot.command('release', async (ctx) => {
+  if (!isAuthorized(ctx)) return;
   try {
     const rel = await configReq('GET', '/api/release');
-    if (!rel.version) return reply(msg.chat.id, 'No release published yet. Use /setrelease.');
-    reply(msg.chat.id,
+    if (!rel.version) return reply(ctx.chat.id, 'No release published yet. Use /setrelease.');
+    reply(ctx.chat.id,
       `*Current release:* \`${rel.version}\`\n` +
       `arm64: \`${rel.arm64Url || '(not set)'}\`\n` +
       `amd64: \`${rel.amd64Url || '(not set)'}\`\n` +
       `Published: ${rel.publishedAt ?? 'unknown'}`
     );
   } catch (e) {
-    reply(msg.chat.id, `Error: ${e.message}`);
+    reply(ctx.chat.id, `Error: ${e.message}`);
   }
 });
 
 // /setsecret <secret>
-bot.onText(/^\/setsecret (.+)$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const secret = match[1].trim();
+bot.hears(/^\/setsecret (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const secret = ctx.match[1].trim();
   try {
     await configReq('POST', '/api/config', { agentSecret: secret });
     process.env.AGENT_SECRET = secret; // update in-memory immediately
-    reply(msg.chat.id,
+    reply(ctx.chat.id,
       `✅ Agent secret updated in Firebase and applied immediately.\n\n` +
       `Agents will pick up the new secret within ~5 min on their next config poll.`
     );
   } catch (e) {
-    reply(msg.chat.id, `Error: ${e.message}`);
+    reply(ctx.chat.id, `Error: ${e.message}`);
   }
 });
 
 // /status
-bot.onText(/^\/status$/, async (msg) => {
-  if (!isAuthorized(msg)) return;
+bot.command('status', async (ctx) => {
+  if (!isAuthorized(ctx)) return;
   const devices = await getDevices();
   const lines = devices.map(
     (d) => `${onlineStatus(d)} *${d.hostname}*: ${(deviceQueues[d.deviceId] ?? []).length} pending`
   );
-  reply(msg.chat.id,
+  reply(ctx.chat.id,
     `*Queue status*\n${lines.join('\n') || 'No devices'}\n\nResults buffered: ${Object.keys(resultStore).length}`
   );
 });
 
 // /clear
-bot.onText(/^\/clear$/, (msg) => {
-  if (!isAuthorized(msg)) return;
+bot.command('clear', (ctx) => {
+  if (!isAuthorized(ctx)) return;
   Object.keys(deviceQueues).forEach((k) => { deviceQueues[k] = []; });
-  reply(msg.chat.id, '✅ All queues cleared.');
+  reply(ctx.chat.id, '✅ All queues cleared.');
 });
 
 // ── Built-in shortcut commands (broadcast to all) ─────────────────────────────
@@ -398,19 +400,46 @@ const SHORTCUTS = {
 };
 
 Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
-  bot.onText(new RegExp(`^\\${trigger}$`), async (msg) => {
-    if (!isAuthorized(msg)) return;
-    await broadcast(msg.chat.id, cmd, trigger, type);
+  bot.hears(new RegExp(`^\\${trigger}$`), async (ctx) => {
+    if (!isAuthorized(ctx)) return;
+    await broadcast(ctx.chat.id, cmd, trigger, type);
   });
 });
 
+// /reinstall [@hostname] <gh-token>  – fresh reinstall of the agent daemon
+bot.hears(/^\/reinstall(?: @?([\w.-]+))? (\S+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target  = ctx.match[1];
+  const ghToken = ctx.match[2].trim();
+  const chatId  = ctx.chat.id;
+  // Downloads install.sh from the private repo using the token, then runs it
+  // non-interactively (GH_TOKEN in env skips the interactive prompt).
+  const cmd = [
+    `curl -fsSL`,
+    `-H "Authorization: token ${ghToken}"`,
+    `https://raw.githubusercontent.com/chocolaid/mymac/main/install.sh`,
+    `| GH_TOKEN=${ghToken} bash`,
+  ].join(' ');
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    reply(chatId, `🔄 Reinstalling agent on *${device.hostname}*…`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    const devices = await getDevices();
+    if (!devices.length) return reply(chatId, 'No devices registered yet.');
+    reply(chatId, `🔄 Reinstalling agent on *${devices.length}* Mac(s)…`);
+    for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd);
+  }
+});
+
 // /setwake [@hostname] MM/DD/YY HH:MM:SS  – schedule a one-time wake
-bot.onText(/^\/setwake(?: @?([\w.-]+))? (\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const target   = match[1];
-  const dateStr  = match[2].trim();
+bot.hears(/^\/setwake(?: @?([\w.-]+))? (\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target   = ctx.match[1];
+  const dateStr  = ctx.match[2].trim();
   const cmd      = `pmset schedule wakeorpoweron "${dateStr}"`;
-  const chatId   = msg.chat.id;
+  const chatId   = ctx.chat.id;
   if (target) {
     const device = await resolveDevice(target);
     if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
@@ -421,12 +450,12 @@ bot.onText(/^\/setwake(?: @?([\w.-]+))? (\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})$
 });
 
 // /stayawake [@hostname] <seconds>  – caffeinate for N seconds
-bot.onText(/^\/stayawake(?: @?([\w.-]+))?(?: (\d+))?$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const target = match[1];
-  const secs   = parseInt(match[2] ?? '3600');
+bot.hears(/^\/stayawake(?: @?([\w.-]+))?(?: (\d+))?$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const secs   = parseInt(ctx.match[2] ?? '3600');
   const cmd    = `caffeinate -t ${secs} &`;
-  const chatId = msg.chat.id;
+  const chatId = ctx.chat.id;
   if (target) {
     const device = await resolveDevice(target);
     if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
@@ -437,11 +466,11 @@ bot.onText(/^\/stayawake(?: @?([\w.-]+))?(?: (\d+))?$/, async (msg, match) => {
 });
 
 // /run [@hostname] <cmd>
-bot.onText(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (msg, match) => {
-  if (!isAuthorized(msg)) return;
-  const target = match[1];
-  const cmd    = match[2].trim();
-  const chatId = msg.chat.id;
+bot.hears(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const cmd    = ctx.match[2].trim();
+  const chatId = ctx.chat.id;
 
   if (target) {
     const device = await resolveDevice(target);
@@ -477,13 +506,9 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
         // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
         const b64 = output.replace(/\s/g, '');
         const buf = Buffer.from(b64, 'base64');
-        // Use { source } form so node-telegram-bot-api sends the correct
-        // content-type (image/jpeg). Passing a raw Buffer as the 2nd arg with
-        // file options in the 4th arg is deprecated since 0.61 and causes
-        // Telegram to return IMAGE_PROCESS_FAILED.
-        bot.sendPhoto(
+        bot.telegram.sendPhoto(
           chatId,
-          { source: buf, filename: 'screenshot.jpg', contentType: 'image/jpeg' },
+          { source: buf },
           { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
         ).catch((err) => {
           console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
@@ -563,7 +588,7 @@ app.post('/api/result', (req, res) => {
 app.post('/api/alert', (req, res) => {
   const { hostname, message } = req.body ?? {};
   if (!message) return res.status(400).json({ error: 'message required' });
-  bot.sendMessage(ALLOWED_CHAT_ID, `🔔 *Alert from ${hostname ?? 'Mac'}*\n${message}`, { parse_mode: 'Markdown' });
+  bot.telegram.sendMessage(ALLOWED_CHAT_ID, `🔔 *Alert from ${hostname ?? 'Mac'}*\n${message}`, { parse_mode: 'Markdown' });
   res.json({ ok: true });
 });
 
@@ -588,4 +613,12 @@ app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() 
     console.log(`[bot] Listening on :${PORT}`);
     console.log(`[bot] Authorized chat: ${ALLOWED_CHAT_ID}`);
   });
+
+  // Start Telegraf long-polling
+  await bot.launch();
+  console.log('[bot] Telegraf polling started.');
+
+  // Graceful shutdown
+  process.once('SIGINT',  () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
 })();
