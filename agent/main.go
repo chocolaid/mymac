@@ -322,6 +322,21 @@ func commandLoop() {
 			continue
 		}
 
+		// ── Special built-in commands ──────────────────────────────────────────
+		if cmd.Cmd == "__update__" {
+			log.Printf("Forced update check requested [%s]", cmd.ID[:8])
+			statusMsg := runUpdateCheck() // exits on success; returns a string if not updated
+			result := map[string]interface{}{
+				"id":       cmd.ID,
+				"deviceId": deviceID,
+				"hostname": hostname,
+				"output":   statusMsg,
+				"exitCode": 0,
+			}
+			botRequest("POST", "/api/result", result) //nolint:errcheck
+			continue
+		}
+
 		log.Printf("Execute [%s]: %s", cmd.ID[:8], cmd.Cmd)
 		output, code := executeCommand(cmd.Cmd)
 		log.Printf("Done    [%s]: exit=%d  %d bytes", cmd.ID[:8], code, len(output))
@@ -468,36 +483,53 @@ func downloadAndApply(url, binaryName, expectedSHA string) error {
 	return applyUpdate(data)
 }
 
+// runUpdateCheck performs a single update check and returns a human-readable
+// status string (used by the __update__ command response).
+// Returns true and calls os.Exit(0) if an update was successfully applied.
+func runUpdateCheck() string {
+	rel, err := fetchRelease()
+	if err != nil {
+		log.Printf("Update check error: %v", err)
+		return fmt.Sprintf("Update check failed: %v", err)
+	}
+	if rel.Version == "" {
+		log.Printf("Update check: no release published yet")
+		return "No release published yet."
+	}
+	if !semverLess(agentVersion, rel.Version) {
+		log.Printf("Update check: already on latest (%s)", agentVersion)
+		return fmt.Sprintf("Already on latest version %s.", agentVersion)
+	}
+
+	log.Printf("New version available: %s → %s", agentVersion, rel.Version)
+
+	var url, expectedSHA, binaryName string
+	if runtime.GOARCH == "arm64" {
+		url, expectedSHA, binaryName = rel.Arm64URL, rel.Arm64Sha256, "agent-darwin-arm64"
+	} else {
+		url, expectedSHA, binaryName = rel.Amd64URL, rel.Amd64Sha256, "agent-darwin-amd64"
+	}
+
+	if url == "" {
+		msg := fmt.Sprintf("No download URL for %s in release %s", binaryName, rel.Version)
+		log.Print(msg)
+		return msg
+	}
+	if err := downloadAndApply(url, binaryName, expectedSHA); err != nil {
+		log.Printf("Update failed: %v", err)
+		return fmt.Sprintf("Update failed: %v", err)
+	}
+	sendAlert(fmt.Sprintf("Agent on %s updated %s → %s — restarting", hostname, agentVersion, rel.Version))
+	log.Printf("Updated to %s — restarting", rel.Version)
+	// LaunchDaemon's KeepAlive will immediately restart with the new binary.
+	os.Exit(0)
+	return "" // unreachable
+}
+
 func updatePoller() {
 	time.Sleep(updateInitialDelay) // let the agent settle before the first check
 	for {
-		rel, err := fetchRelease()
-		if err != nil {
-			log.Printf("Update check error: %v", err)
-		} else if rel.Version != "" && semverLess(agentVersion, rel.Version) {
-			log.Printf("New version available: %s → %s", agentVersion, rel.Version)
-
-			var url, expectedSHA, binaryName string
-			if runtime.GOARCH == "arm64" {
-				url, expectedSHA, binaryName = rel.Arm64URL, rel.Arm64Sha256, "agent-darwin-arm64"
-			} else {
-				url, expectedSHA, binaryName = rel.Amd64URL, rel.Amd64Sha256, "agent-darwin-amd64"
-			}
-
-			if url == "" {
-				log.Printf("No download URL for %s in release %s", binaryName, rel.Version)
-			} else if err := downloadAndApply(url, binaryName, expectedSHA); err != nil {
-				log.Printf("Update failed: %v", err)
-			} else {
-				sendAlert(fmt.Sprintf("Agent on %s updated %s → %s — restarting", hostname, agentVersion, rel.Version))
-				log.Printf("Updated to %s — restarting", rel.Version)
-				// The daemon is stateless; LaunchDaemon's KeepAlive will immediately
-				// restart the process with the newly installed binary.
-				os.Exit(0)
-			}
-		} else {
-			log.Printf("Update check: already on latest (%s)", agentVersion)
-		}
+		runUpdateCheck()
 		time.Sleep(updateInterval)
 	}
 }
@@ -517,7 +549,11 @@ func main() {
 	log.Printf("Starting — hostname=%s deviceId=%s arch=%s version=%s", hostname, deviceID[:8], runtime.GOARCH, agentVersion)
 	log.Printf("Config server: %s", configServerURL)
 
-	// ── Step 1: Fetch config from Vercel (retry until we get it) ──────────────
+	// ── Step 1: Fetch config from Vercel (retry on errors only) ─────────────
+	// We apply whatever we get — even an empty serverUrl — so that registration
+	// (Step 2) can proceed immediately. The command loop handles the case where
+	// serverUrl is not set yet, and the config poller will fill it in once the
+	// admin runs /setserver.
 	log.Println("Fetching config from Vercel...")
 	for {
 		cfg, err := fetchConfig()
@@ -526,17 +562,18 @@ func main() {
 			time.Sleep(10 * time.Second)
 			continue
 		}
-		if cfg.ServerURL == "" {
-			log.Println("Config has no serverUrl yet — waiting for admin to set it. Retrying in 15s...")
-			time.Sleep(15 * time.Second)
-			continue
-		}
 		applyConfig(cfg)
-		log.Printf("Config loaded v%d — server: %s", cfg.Version, cfg.ServerURL)
+		if cfg.ServerURL == "" {
+			log.Printf("Config loaded v%d — serverUrl not set yet (admin must run /setserver). Registering anyway.", cfg.Version)
+		} else {
+			log.Printf("Config loaded v%d — server: %s", cfg.Version, cfg.ServerURL)
+		}
 		break
 	}
 
 	// ── Step 2: Register device on Vercel ─────────────────────────────────────
+	// Registration targets the Vercel config server, not the bot server, so it
+	// does not depend on serverUrl being set.
 	for attempt := 0; attempt < 10; attempt++ {
 		if err := registerDevice(); err != nil {
 			log.Printf("Registration failed (attempt %d): %v", attempt+1, err)

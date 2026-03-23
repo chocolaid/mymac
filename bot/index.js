@@ -108,7 +108,8 @@ bot.onText(/^\/help$/, (msg) => {
     `\`/setsecret <secret>\` – update agent secret\n\n` +
     `*Releases (agent self-update):*\n` +
     `\`/release\` – show published release\n` +
-    `\`/setrelease <ver> <arm64-url> [amd64-url]\` – publish new release\n\n` +
+    `\`/setrelease <ver> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]\` – publish new release\n` +
+    `\`/update [@hostname]\` – force immediate update check\n\n` +
     `*Queue:*\n` +
     `\`/status\` – pending command counts\n` +
     `\`/clear\` – clear all queues`
@@ -179,27 +180,51 @@ bot.onText(/^\/setserver (.+)$/, async (msg, match) => {
   }
 });
 
-// /setrelease <version> <arm64-url> [amd64-url]
+// /setrelease <version> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]
 bot.onText(/^\/setrelease (.+)$/, async (msg, match) => {
   if (!isAuthorized(msg)) return;
   const parts = match[1].trim().split(/\s+/);
-  const [version, arm64Url, amd64Url] = parts;
+  const [version, arm64Url, amd64Url, arm64Sha256, amd64Sha256] = parts;
   if (!version || !arm64Url) {
-    return reply(msg.chat.id, 'Usage: `/setrelease <version> <arm64-url> [amd64-url]`');
+    return reply(msg.chat.id,
+      'Usage: `/setrelease <version> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]`'
+    );
   }
   try {
     await configReq('POST', '/api/release', {
       version,
       arm64Url,
-      ...(amd64Url ? { amd64Url } : {}),
+      ...(amd64Url    ? { amd64Url }    : {}),
+      ...(arm64Sha256 ? { arm64Sha256 } : {}),
+      ...(amd64Sha256 ? { amd64Sha256 } : {}),
     });
+    const shaNote = arm64Sha256 ? `\narm64 sha256: \`${arm64Sha256.slice(0, 12)}…\`` : ' _(no checksum — less secure)_';
     reply(msg.chat.id,
       `✅ Release published: \`${version}\`\n` +
-      `arm64: \`${arm64Url}\`\n\n` +
-      `Agents will update within ~1 hour on their next check.`
+      `arm64: \`${arm64Url}\`${shaNote}\n\n` +
+      `Agents will update within ~1 hour, or immediately via /update.`
     );
   } catch (e) {
     reply(msg.chat.id, `Error: ${e.message}`);
+  }
+});
+
+// /update [@hostname] – force immediate update check on one or all agents
+bot.onText(/^\/update(?: @?([\w.-]+))?$/, async (msg, match) => {
+  if (!isAuthorized(msg)) return;
+  const target = match[1];
+  const chatId = msg.chat.id;
+  const cmd = '__update__';
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+    reply(chatId, `🔄 Update check triggered on *${device.hostname}*.`);
+  } else {
+    const devices = await getDevices();
+    if (!devices.length) return reply(chatId, 'No devices registered yet.');
+    for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd);
+    reply(chatId, `🔄 Update check triggered on *${devices.length}* Mac(s).`);
   }
 });
 
@@ -313,12 +338,21 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
       delete resultStore[id];
 
       if (type === 'screenshot' && exitCode === 0 && output.trim().length > 0) {
-        const buf = Buffer.from(output.trim(), 'base64');
-        bot.sendPhoto(chatId, buf, { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' })
-          .catch((err) => {
-            console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
-            reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
-          });
+        // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
+        const b64 = output.replace(/\s/g, '');
+        const buf = Buffer.from(b64, 'base64');
+        // fileOptions (4th arg) are required when sending a Buffer — without them
+        // node-telegram-bot-api doesn't declare a content type and Telegram returns
+        // IMAGEPROCESSFAILED.
+        bot.sendPhoto(
+          chatId,
+          buf,
+          { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
+          { filename: 'screenshot.jpg', contentType: 'image/jpeg' },
+        ).catch((err) => {
+          console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
+          reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
+        });
         return;
       }
 

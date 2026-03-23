@@ -8,7 +8,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 export default async function handler(req, res) {
   const token = req.headers['x-admin-token'];
   if (!token || token !== ADMIN_TOKEN) return res.status(401).json({ error: 'unauthorized' });
-
+0
   if (req.method === 'GET') {
     let cfg = await ecGet('config');
     if (!cfg) {
