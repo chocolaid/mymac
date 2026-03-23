@@ -78,6 +78,7 @@ const bot = new Telegraf(TELEGRAM_TOKEN);
 // /start
 bot.command('start', (ctx) => {
   if (!isAuthorized(ctx)) return;
+  console.log(`[cmd] /start from chatId=${ctx.chat.id}`);
   reply(ctx.chat.id,
     `*mymac admin*\n\nControl all your Macs remotely.\n\n` +
     `• \`/devices\` – list all Macs\n` +
@@ -92,6 +93,7 @@ bot.command('start', (ctx) => {
 // /help
 bot.command('help', (ctx) => {
   if (!isAuthorized(ctx)) return;
+  console.log(`[cmd] /help from chatId=${ctx.chat.id}`);
   reply(ctx.chat.id,
     `*Commands*\n\n` +
     `*Run raw shell:*\n` +
@@ -172,6 +174,7 @@ bot.command('help', (ctx) => {
 // /devices
 bot.command('devices', async (ctx) => {
   if (!isAuthorized(ctx)) return;
+  console.log(`[cmd] /devices from chatId=${ctx.chat.id}`);
   const chatId = ctx.chat.id;
   try {
     const devices = await getDevices(true);
@@ -194,6 +197,7 @@ bot.command('devices', async (ctx) => {
 bot.hears(/^\/forget @?(\S+)$/, async (ctx) => {
   if (!isAuthorized(ctx)) return;
   const match = ctx.match;
+  console.log(`[cmd] /forget target=${match[1]} from chatId=${ctx.chat.id}`);
   const device = await resolveDevice(match[1].trim());
   if (!device) return reply(ctx.chat.id, `Device \`${match[1]}\` not found.`);
   await configReq('POST', '/api/devices/remove', { deviceId: device.deviceId });
@@ -205,6 +209,7 @@ bot.hears(/^\/forget @?(\S+)$/, async (ctx) => {
 // /config
 bot.command('config', async (ctx) => {
   if (!isAuthorized(ctx)) return;
+  console.log(`[cmd] /config from chatId=${ctx.chat.id}`);
   try {
     const cfg = await configReq('GET', '/api/config');
     reply(ctx.chat.id,
@@ -223,6 +228,7 @@ bot.command('config', async (ctx) => {
 bot.hears(/^\/setserver (.+)$/, async (ctx) => {
   if (!isAuthorized(ctx)) return;
   const url = ctx.match[1].trim().replace(/\/$/, '');
+  console.log(`[cmd] /setserver url=${url} from chatId=${ctx.chat.id}`);
   try {
     await configReq('POST', '/api/config', { serverUrl: url });
     reply(ctx.chat.id,
@@ -303,6 +309,7 @@ bot.command('release', async (ctx) => {
 bot.hears(/^\/setsecret (.+)$/, async (ctx) => {
   if (!isAuthorized(ctx)) return;
   const secret = ctx.match[1].trim();
+  console.log(`[cmd] /setsecret secret=****${secret.slice(-4)} from chatId=${ctx.chat.id}`);
   try {
     await configReq('POST', '/api/config', { agentSecret: secret });
     process.env.AGENT_SECRET = secret; // update in-memory immediately
@@ -318,6 +325,7 @@ bot.hears(/^\/setsecret (.+)$/, async (ctx) => {
 // /status
 bot.command('status', async (ctx) => {
   if (!isAuthorized(ctx)) return;
+  console.log(`[cmd] /status from chatId=${ctx.chat.id}`);
   const devices = await getDevices();
   const lines = devices.map(
     (d) => `${onlineStatus(d)} *${d.hostname}*: ${(deviceQueues[d.deviceId] ?? []).length} pending`
@@ -330,6 +338,7 @@ bot.command('status', async (ctx) => {
 // /clear
 bot.command('clear', (ctx) => {
   if (!isAuthorized(ctx)) return;
+  console.log(`[cmd] /clear from chatId=${ctx.chat.id}`);
   Object.keys(deviceQueues).forEach((k) => { deviceQueues[k] = []; });
   reply(ctx.chat.id, '✅ All queues cleared.');
 });
@@ -402,6 +411,7 @@ const SHORTCUTS = {
 Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
   bot.hears(new RegExp(`^\\${trigger}$`), async (ctx) => {
     if (!isAuthorized(ctx)) return;
+    console.log(`[cmd] ${trigger} type=${type ?? 'text'} from chatId=${ctx.chat.id}`);
     await broadcast(ctx.chat.id, cmd, trigger, type);
   });
 });
@@ -471,7 +481,7 @@ bot.hears(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
   const target = ctx.match[1];
   const cmd    = ctx.match[2].trim();
   const chatId = ctx.chat.id;
-
+  console.log(`[cmd] /run target=${target ?? 'all'} cmd="${cmd.slice(0, 80)}" from chatId=${chatId}`);
   if (target) {
     const device = await resolveDevice(target);
     if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
@@ -485,6 +495,7 @@ bot.hears(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
 async function broadcast(chatId, cmd, label, type) {
   const devices = await getDevices();
   if (!devices.length) return reply(chatId, 'No devices registered yet.');
+  console.log(`[broadcast] cmd="${label}" type=${type ?? 'text'} targets=${devices.map(d => d.hostname).join(', ')}`);
   reply(chatId, `📡 Broadcasting to *${devices.length}* Mac(s):\n\`\`\`\n${label}\n\`\`\``);
   for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd, type);
 }
@@ -493,26 +504,46 @@ function enqueue(chatId, deviceId, hostname, cmd, type) {
   const id = uuidv4();
   if (!deviceQueues[deviceId]) deviceQueues[deviceId] = [];
   deviceQueues[deviceId].push({ id, cmd, chatId, requestedAt: Date.now() });
+  const qLen = deviceQueues[deviceId].length;
+  console.log(`[enqueue] id=${id.slice(0,8)} host=${hostname} type=${type ?? 'text'} queueLen=${qLen} cmd="${cmd.slice(0, 80)}${cmd.length > 80 ? '…' : ''}"`);
   waitForResult(id, chatId, hostname, cmd, type);
 }
 
 function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 90_000) {
+  console.log(`[wait] id=${id.slice(0,8)} host=${hostname} type=${type ?? 'text'} timeout=${Math.round((deadline - Date.now()) / 1000)}s`);
   const tick = () => {
     if (resultStore[id]) {
       const { output, exitCode } = resultStore[id];
       delete resultStore[id];
+      console.log(`[result] id=${id.slice(0,8)} host=${hostname} exit=${exitCode} outputBytes=${output.length}`);
 
       if (type === 'screenshot' && exitCode === 0 && output.trim().length > 0) {
         // Strip all whitespace (macOS base64 wraps at 76 chars) before decoding.
         const b64 = output.replace(/\s/g, '');
         const buf = Buffer.from(b64, 'base64');
+        console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} b64Chars=${b64.length} bufBytes=${buf.length} chatId=${chatId} — calling bot.telegram.sendPhoto`);
         bot.telegram.sendPhoto(
           chatId,
           { source: buf },
           { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
-        ).catch((err) => {
-          console.error(`[bot] sendPhoto failed for ${hostname}:`, err.message);
-          reply(chatId, `📋 *${hostname}* — screenshot failed: ${err.message}`);
+        ).then(() => {
+          console.log(`[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto OK`);
+        }).catch((err) => {
+          const tgCode    = err.response?.error_code  ?? 'n/a';
+          const tgDesc    = err.response?.description ?? 'n/a';
+          const tgParams  = JSON.stringify(err.response?.parameters ?? {});
+          console.error(
+            `[screenshot] id=${id.slice(0,8)} host=${hostname} — sendPhoto FAILED\n` +
+            `  message:     ${err.message}\n` +
+            `  tg_code:     ${tgCode}\n` +
+            `  tg_desc:     ${tgDesc}\n` +
+            `  tg_params:   ${tgParams}\n` +
+            `  buf_bytes:   ${buf.length}\n` +
+            `  b64_chars:   ${b64.length}\n` +
+            `  chatId:      ${chatId}\n` +
+            `  stack:\n${err.stack}`
+          );
+          reply(chatId, `📋 *${hostname}* — screenshot failed\n\`tg_code ${tgCode}: ${tgDesc}\`\nbuf: ${buf.length} bytes`);
         });
         return;
       }
@@ -520,10 +551,12 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
       const text = output.length > 3500
         ? output.slice(0, 3500) + '\n…(truncated)'
         : output || '(no output)';
+      console.log(`[reply] id=${id.slice(0,8)} host=${hostname} exit=${exitCode} textLen=${text.length}`);
       reply(chatId, `📋 *${hostname}* \\(exit ${exitCode}\\)\n\`\`\`\n${text}\n\`\`\``);
       return;
     }
     if (Date.now() > deadline) {
+      console.warn(`[timeout] id=${id.slice(0,8)} host=${hostname} cmd="${cmd.slice(0, 60)}"`);
       reply(chatId, `⏰ *${hostname}* — no response for: \`${cmd.slice(0, 60)}\``);
       return;
     }
@@ -562,6 +595,7 @@ app.use('/api', rateLimit({ windowMs: 10_000, max: 60 }));
 // Agent auth — reads process.env.AGENT_SECRET which is kept fresh by syncConfigFromServer()
 app.use('/api', (req, res, next) => {
   if (req.headers['x-agent-secret'] !== process.env.AGENT_SECRET) {
+    console.warn(`[auth] REJECTED ${req.method} ${req.path} from ${req.ip} — bad secret`);
     return res.status(401).json({ error: 'unauthorized' });
   }
   next();
@@ -573,14 +607,19 @@ app.get('/api/command', (req, res) => {
   if (!device) return res.status(400).json({ error: 'device query param required' });
   const queue = deviceQueues[device] ?? [];
   if (!queue.length) return res.status(204).end();
-  res.json(queue.shift());
+  const item = queue.shift();
+  console.log(`[dispatch] id=${item.id.slice(0,8)} device=${device.slice(0,8)} cmd="${item.cmd.slice(0, 80)}${item.cmd.length > 80 ? '…' : ''}" remainingQueue=${queue.length}`);
+  res.json(item);
 });
 
 // POST /api/result  { id, deviceId, hostname, output, exitCode }
 app.post('/api/result', (req, res) => {
-  const { id, output, exitCode } = req.body;
+  const { id, output, exitCode, hostname, deviceId } = req.body;
   if (!id) return res.status(400).json({ error: 'id required' });
-  resultStore[id] = { output: String(output ?? ''), exitCode: Number(exitCode ?? -1), finishedAt: Date.now() };
+  const outStr = String(output ?? '');
+  const claimedLen = req.headers['content-length'] ?? '?';
+  console.log(`[api/result] id=${id.slice(0,8)} host=${hostname ?? '?'} device=${(deviceId ?? '?').slice(0,8)} exit=${exitCode} outputBytes=${outStr.length} content-length=${claimedLen}`);
+  resultStore[id] = { output: outStr, exitCode: Number(exitCode ?? -1), finishedAt: Date.now() };
   res.json({ ok: true });
 });
 
@@ -588,12 +627,29 @@ app.post('/api/result', (req, res) => {
 app.post('/api/alert', (req, res) => {
   const { hostname, message } = req.body ?? {};
   if (!message) return res.status(400).json({ error: 'message required' });
+  console.log(`[api/alert] host=${hostname ?? '?'} message="${message.slice(0, 100)}"`);
   bot.telegram.sendMessage(ALLOWED_CHAT_ID, `🔔 *Alert from ${hostname ?? 'Mac'}*\n${message}`, { parse_mode: 'Markdown' });
   res.json({ ok: true });
 });
 
 // GET /health
 app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+
+// ─── Express error handler (catches body-too-large, JSON parse failures, etc.) ─
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const status = err.status ?? err.statusCode ?? 500;
+  console.error(
+    `[express-error] ${req.method} ${req.path} → ${status}\n` +
+    `  type:     ${err.type ?? 'n/a'}\n` +
+    `  message:  ${err.message}\n` +
+    `  content-length: ${req.headers['content-length'] ?? '?'}\n` +
+    `  ip:       ${req.ip}\n` +
+    (status === 413 ? '  *** Body too large — increase express.json limit or nginx client_max_body_size ***\n' : '') +
+    `  stack:\n${err.stack}`
+  );
+  res.status(status).json({ error: err.message ?? 'internal error' });
+});
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 (async () => {
