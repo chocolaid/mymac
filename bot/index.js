@@ -357,8 +357,8 @@ const SHORTCUTS = {
   '/crontabs':      { cmd: 'crontab -l 2>/dev/null; ls /etc/cron* 2>/dev/null' },
 
   // Screen & camera
-  '/screenshot':    { cmd: 'screencapture -x -t jpg /tmp/_sc.jpg && base64 /tmp/_sc.jpg && rm -f /tmp/_sc.jpg', type: 'screenshot' },
-  '/webcam':        { cmd: 'ffmpeg -f avfoundation -video_size 1280x720 -framerate 30 -i "0" -frames:v 1 -y /tmp/_wc.jpg 2>/dev/null && base64 /tmp/_wc.jpg && rm -f /tmp/_wc.jpg', type: 'screenshot' },
+  '/screenshot':    { cmd: 'CU=$(stat -f \'%Su\' /dev/console); sudo -u "$CU" screencapture -x /tmp/_sc.png && base64 /tmp/_sc.png && rm -f /tmp/_sc.png', type: 'screenshot', ext: 'png' },
+  '/webcam':        { cmd: 'CU=$(stat -f \'%Su\' /dev/console); sudo -u "$CU" ffmpeg -f avfoundation -video_size 1280x720 -framerate 30 -i "0" -frames:v 1 -y /tmp/_wc.jpg 2>/dev/null && base64 /tmp/_wc.jpg && rm -f /tmp/_wc.jpg', type: 'screenshot', ext: 'jpg' },
   '/lock':          { cmd: `osascript -e 'tell application "System Events" to keystroke "q" using {command down, control down}'` },
   '/sleep':         { cmd: 'pmset sleepnow' },
   '/darkmode':      { cmd: `osascript -e 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'` },
@@ -408,11 +408,11 @@ const SHORTCUTS = {
   '/enablewol':     { cmd: 'pmset -a womp 1' },
 };
 
-Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
+Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type, ext }]) => {
   bot.hears(new RegExp(`^\\${trigger}$`), async (ctx) => {
     if (!isAuthorized(ctx)) return;
     console.log(`[cmd] ${trigger} type=${type ?? 'text'} from chatId=${ctx.chat.id}`);
-    await broadcast(ctx.chat.id, cmd, trigger, type);
+    await broadcast(ctx.chat.id, cmd, trigger, type, ext);
   });
 });
 
@@ -492,25 +492,25 @@ bot.hears(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
 });
 
 // ─── Core: enqueue + broadcast ────────────────────────────────────────────────
-async function broadcast(chatId, cmd, label, type) {
+async function broadcast(chatId, cmd, label, type, ext) {
   const devices = await getDevices();
   if (!devices.length) return reply(chatId, 'No devices registered yet.');
-  console.log(`[broadcast] cmdalso the image is giving me="${label}" type=${type ?? 'text'} targets=${devices.map(d => d.hostname).join(', ')}`);
+  console.log(`[broadcast] cmd="${label}" type=${type ?? 'text'} targets=${devices.map(d => d.hostname).join(', ')}`);
   reply(chatId, `📡 Broadcasting to *${devices.length}* Mac(s):\n\`\`\`\n${label}\n\`\`\``);
-  for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd, type);
+  for (const d of devices) enqueue(chatId, d.deviceId, d.hostname, cmd, type, ext);
 }
 
-function enqueue(chatId, deviceId, hostname, cmd, type) {
+function enqueue(chatId, deviceId, hostname, cmd, type, ext) {
   const id = uuidv4();
   if (!deviceQueues[deviceId]) deviceQueues[deviceId] = [];
   deviceQueues[deviceId].push({ id, cmd, chatId, requestedAt: Date.now() });
   const qLen = deviceQueues[deviceId].length;
-  console.log(`[enqueue] id=${id.slice(0,8)} host=${hostname} type=${type ?? 'text'} queueLen=${qLen} cmd="${cmd.slice(0, 80)}${cmd.length > 80 ? '…' : ''}"`);
-  waitForResult(id, chatId, hostname, cmd, type);
+  console.log(`[enqueue] id=${id.slice(0,8)} host=${hostname} type=${type ?? 'text'} ext=${ext ?? 'n/a'} queueLen=${qLen} cmd="${cmd.slice(0, 80)}${cmd.length > 80 ? '…' : ''}"`);
+  waitForResult(id, chatId, hostname, cmd, type, ext);
 }
 
-function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 90_000) {
-  console.log(`[wait] id=${id.slice(0,8)} host=${hostname} type=${type ?? 'text'} timeout=${Math.round((deadline - Date.now()) / 1000)}s`);
+function waitForResult(id, chatId, hostname, cmd, type, ext, deadline = Date.now() + 90_000) {
+  console.log(`[wait] id=${id.slice(0,8)} host=${hostname} type=${type ?? 'text'} ext=${ext ?? 'n/a'} timeout=${Math.round((deadline - Date.now()) / 1000)}s`);
   const tick = () => {
     if (resultStore[id]) {
       const { output, exitCode } = resultStore[id];
@@ -526,19 +526,22 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
         const b64 = b64raw + '='.repeat((4 - (b64raw.length % 4)) % 4);
         const buf = Buffer.from(b64, 'base64');
 
-        // Validate JPEG magic bytes (FF D8 FF) so we know the decode is sane.
-        const magic = buf.slice(0, 4).toString('hex');
-        const tail  = buf.slice(-4).toString('hex');
-        const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+        // Validate image magic bytes: JPEG = FF D8 FF, PNG = 89 50 4E 47
+        const magic   = buf.slice(0, 4).toString('hex');
+        const tail    = buf.slice(-4).toString('hex');
+        const isJpeg  = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+        const isPng   = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+        const isValid = isJpeg || isPng;
+        const filename = `screenshot.${ext ?? (isPng ? 'png' : 'jpg')}`;
         console.log(
           `[screenshot] id=${id.slice(0,8)} host=${hostname}` +
           ` b64Raw=${b64raw.length} b64Padded=${b64.length} bufBytes=${buf.length}` +
-          ` magic=${magic} tail=${tail} validJpeg=${isJpeg} chatId=${chatId}`
+          ` magic=${magic} tail=${tail} validImage=${isValid} (jpeg=${isJpeg} png=${isPng}) filename=${filename} chatId=${chatId}`
         );
 
-        if (!isJpeg) {
-          console.error(`[screenshot] id=${id.slice(0,8)} host=${hostname} — INVALID JPEG header (${magic}), aborting sendPhoto`);
-          reply(chatId, `📋 *${hostname}* — screenshot decode failed: bad JPEG header \`${magic}\` (bufBytes=${buf.length})`);
+        if (!isValid) {
+          console.error(`[screenshot] id=${id.slice(0,8)} host=${hostname} — INVALID image header (${magic}), aborting`);
+          reply(chatId, `📋 *${hostname}* — screenshot decode failed: unrecognised header \`${magic}\` (bufBytes=${buf.length})`);
           return;
         }
 
@@ -546,7 +549,7 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
         // fall back to sendDocument which delivers the raw file without processing.
         const sendAsPhoto = () => bot.telegram.sendPhoto(
           chatId,
-          { source: Buffer.from(buf), filename: 'screenshot.jpg' },
+          { source: Buffer.from(buf), filename },
           { caption: `📸 *${hostname}*`, parse_mode: 'Markdown' },
         );
 
@@ -554,7 +557,7 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
           console.warn(`[screenshot] id=${id.slice(0,8)} host=${hostname} — falling back to sendDocument (reason: ${reason})`);
           return bot.telegram.sendDocument(
             chatId,
-            { source: Buffer.from(buf), filename: 'screenshot.jpg' },
+            { source: Buffer.from(buf), filename },
             { caption: `📸 *${hostname}* (sent as file — ${reason})`, parse_mode: 'Markdown' },
           );
         };
@@ -573,6 +576,7 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
               `  b64_padded: ${b64.length}\n` +
               `  b64_raw:    ${b64raw.length}\n` +
               `  magic:      ${magic}  tail: ${tail}\n` +
+              `  filename:   ${filename}\n` +
               `  stack:\n${err.stack}`
             );
             if (tgDesc.includes('IMAGE_PROCESS_FAILED') || tgCode === 400) {

