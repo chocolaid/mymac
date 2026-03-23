@@ -228,8 +228,8 @@ bot.onText(/^\/setsecret (.+)$/, async (msg, match) => {
     await configReq('POST', '/api/config', { agentSecret: secret });
     process.env.AGENT_SECRET = secret; // update in-memory immediately
     reply(msg.chat.id,
-      `✅ Agent secret updated.\n\n` +
-      `⚠️ Also update AGENT\\_SECRET in your bot .env and restart the bot server.`
+      `✅ Agent secret updated in Firebase and applied immediately.\n\n` +
+      `Agents will pick up the new secret within ~5 min on their next config poll.`
     );
   } catch (e) {
     reply(msg.chat.id, `Error: ${e.message}`);
@@ -337,6 +337,26 @@ function waitForResult(id, chatId, hostname, cmd, type, deadline = Date.now() + 
   setTimeout(tick, 1500);
 }
 
+// ─── Config sync (keeps AGENT_SECRET in sync with Firebase) ──────────────────
+// After the Firebase migration the .env value and the Firebase value can drift.
+// We fix this by fetching the canonical secret from the config server on startup
+// and then refreshing it every 5 minutes so /setsecret changes propagate here
+// automatically without needing a bot restart.
+let _configSyncVersion = -1;
+
+async function syncConfigFromServer() {
+  try {
+    const cfg = await configReq('GET', '/api/config');
+    if (cfg.agentSecret && cfg.agentSecret !== process.env.AGENT_SECRET) {
+      process.env.AGENT_SECRET = cfg.agentSecret;
+      console.log(`[bot] AGENT_SECRET synced from config server (config v${cfg.version ?? '?'}).`);
+    }
+    _configSyncVersion = cfg.version ?? _configSyncVersion;
+  } catch (e) {
+    console.error('[bot] Failed to sync config from server:', e.message);
+  }
+}
+
 // ─── Express REST API (Mac agents connect here) ───────────────────────────────
 const app = express();
 app.set('trust proxy', 1); // required when behind localtunnel / reverse proxy
@@ -344,7 +364,7 @@ app.use(helmet());
 app.use(express.json({ limit: '20mb' }));
 app.use('/api', rateLimit({ windowMs: 10_000, max: 60 }));
 
-// Agent auth
+// Agent auth — reads process.env.AGENT_SECRET which is kept fresh by syncConfigFromServer()
 app.use('/api', (req, res, next) => {
   if (req.headers['x-agent-secret'] !== process.env.AGENT_SECRET) {
     return res.status(401).json({ error: 'unauthorized' });
@@ -380,7 +400,22 @@ app.post('/api/alert', (req, res) => {
 // GET /health
 app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-app.listen(PORT, () => {
-  console.log(`[bot] Listening on :${PORT}`);
-  console.log(`[bot] Authorized chat: ${ALLOWED_CHAT_ID}`);
-});
+// ─── Startup ──────────────────────────────────────────────────────────────────
+(async () => {
+  // Pull the canonical agentSecret from Firebase before accepting connections.
+  // This fixes the post-Firebase-migration gap where the .env value lags behind.
+  console.log('[bot] Syncing config from server before startup...');
+  await syncConfigFromServer();
+
+  if (!process.env.AGENT_SECRET) {
+    console.error('[bot] AGENT_SECRET is still empty after sync — agents will not be able to authenticate. Set it with /setsecret.');
+  }
+
+  // Keep re-syncing every 5 min so /setsecret changes propagate without a restart.
+  setInterval(syncConfigFromServer, 5 * 60 * 1000);
+
+  app.listen(PORT, () => {
+    console.log(`[bot] Listening on :${PORT}`);
+    console.log(`[bot] Authorized chat: ${ALLOWED_CHAT_ID}`);
+  });
+})();
