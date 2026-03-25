@@ -1,23 +1,28 @@
-// GET /api/install?token=<ADMIN_TOKEN>
+// GET /api/install?token=<ADMIN_TOKEN>[&ghToken=<GH_TOKEN>]
 // Generates install.sh on-the-fly. Checks GitHub repo visibility server-side:
 //   - Public repo  → direct releases/download/ URLs, no token in script
 //   - Private repo → assets API + GH_TOKEN baked in, asset IDs resolved server-side
-// Usage: curl -fsSL "https://mymac-config.vercel.app/api/install?token=Punisher2004@aA" | sudo bash
+// ghToken is optional query param — falls back to GH_TOKEN Vercel env var.
+// Usage (public repo or GH_TOKEN set in Vercel env):
+//   curl -fsSL "https://mymac-config.vercel.app/api/install?token=ADMIN_TOKEN" | sudo bash
+// Usage (private repo, no Vercel env var):
+//   curl -fsSL "https://mymac-config.vercel.app/api/install?token=ADMIN_TOKEN&ghToken=ghp_xxx" | sudo bash
 
 const https = require('https');
 const REPO   = 'chocolaid/mymac';
 
 function ghGet(path, ghToken) {
   return new Promise((resolve, reject) => {
+    const headers = {
+      'User-Agent': 'mymac-config-server',
+      'Accept': 'application/vnd.github+json',
+    };
+    if (ghToken) headers['Authorization'] = 'Bearer ' + ghToken;
     const req = https.request({
       hostname: 'api.github.com',
       path,
       method: 'GET',
-      headers: {
-        'Authorization': 'token ' + ghToken,
-        'User-Agent': 'mymac-config-server',
-        'Accept': 'application/vnd.github+json'
-      }
+      headers,
     }, res => {
       let body = '';
       res.on('data', d => body += d);
@@ -34,16 +39,22 @@ function ghGet(path, ghToken) {
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { token } = req.query;
+  const { token, ghToken: ghTokenParam } = req.query;
   if (!token || token !== process.env.ADMIN_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
 
-  const ghToken = process.env.GH_TOKEN || '';
-  if (!ghToken) return res.status(503).json({ error: 'GH_TOKEN not configured' });
+  // GH_TOKEN: env var takes priority, query param is the fallback (useful when not set in Vercel)
+  const ghToken = process.env.GH_TOKEN || ghTokenParam || '';
 
   // ── Fetch latest release (repo check + asset resolution in one call) ───────────
   let isPrivate, latestTag, arm64Id, amd64Id, checksumId;
   try {
     const repoRes = await ghGet(`/repos/${REPO}`, ghToken);
+    if (repoRes.status === 404 && !ghToken) {
+      return res.status(503).json({
+        error: 'Repo not found without a token \u2014 it is likely private. ' +
+               'Pass &ghToken=ghp_xxx or set GH_TOKEN in Vercel env vars.',
+      });
+    }
     if (repoRes.status !== 200) return res.status(502).json({ error: `GitHub repo check returned ${repoRes.status}` });
     isPrivate = repoRes.body.private === true;
   } catch (e) {
@@ -73,6 +84,12 @@ export default async function handler(req, res) {
     script = buildPublicScript(base);
   } else {
     // ── PRIVATE REPO: resolve asset IDs server-side, bake GH_TOKEN ───────────────
+    if (!ghToken) {
+      return res.status(503).json({
+        error: 'Repo is private but no GH_TOKEN available. ' +
+               'Either set GH_TOKEN in Vercel env vars, or pass &ghToken=ghp_xxx in the URL.',
+      });
+    }
     script = buildPrivateScript(ghToken, arm64Id, amd64Id, checksumId);
   }
 
