@@ -6,7 +6,6 @@
 
 const https = require('https');
 const REPO   = 'chocolaid/mymac';
-const TAG    = 'v2.0.2';
 
 function ghGet(path, ghToken) {
   return new Promise((resolve, reject) => {
@@ -41,36 +40,39 @@ export default async function handler(req, res) {
   const ghToken = process.env.GH_TOKEN || '';
   if (!ghToken) return res.status(503).json({ error: 'GH_TOKEN not configured' });
 
-  // ── Check repo visibility ─────────────────────────────────────────────────────
-  let isPrivate;
+  // ── Fetch latest release (repo check + asset resolution in one call) ───────────
+  let isPrivate, latestTag, arm64Id, amd64Id, checksumId;
   try {
-    const { status, body } = await ghGet(`/repos/${REPO}`, ghToken);
-    if (status !== 200) return res.status(502).json({ error: `GitHub repo check returned ${status}` });
-    isPrivate = body.private === true;
+    const repoRes = await ghGet(`/repos/${REPO}`, ghToken);
+    if (repoRes.status !== 200) return res.status(502).json({ error: `GitHub repo check returned ${repoRes.status}` });
+    isPrivate = repoRes.body.private === true;
   } catch (e) {
     return res.status(502).json({ error: 'GitHub repo check failed: ' + e.message });
+  }
+
+  // Resolve latest release tag
+  try {
+    const relRes = await ghGet(`/repos/${REPO}/releases/latest`, ghToken);
+    if (relRes.status !== 200) return res.status(502).json({ error: `GitHub latest release returned ${relRes.status}` });
+    latestTag = relRes.body.tag_name;
+    if (!latestTag) return res.status(502).json({ error: 'No releases found — run build.sh first' });
+    const assets = relRes.body.assets || [];
+    arm64Id    = assets.find(a => a.name === 'agent-darwin-arm64')?.id;
+    amd64Id    = assets.find(a => a.name === 'agent-darwin-amd64')?.id;
+    checksumId = assets.find(a => a.name === 'checksums.txt')?.id;
+    if (!arm64Id || !amd64Id) return res.status(502).json({ error: `Release assets missing from ${latestTag}` });
+  } catch (e) {
+    return res.status(502).json({ error: 'GitHub release fetch failed: ' + e.message });
   }
 
   let script;
 
   if (!isPrivate) {
     // ── PUBLIC REPO: simple direct URLs, no token needed ─────────────────────────
-    const base = `https://github.com/${REPO}/releases/download/${TAG}`;
+    const base = `https://github.com/${REPO}/releases/download/${latestTag}`;
     script = buildPublicScript(base);
   } else {
     // ── PRIVATE REPO: resolve asset IDs server-side, bake GH_TOKEN ───────────────
-    let arm64Id, amd64Id, checksumId;
-    try {
-      const { status, body } = await ghGet(`/repos/${REPO}/releases/tags/${TAG}`, ghToken);
-      if (status !== 200) return res.status(502).json({ error: `GitHub releases API returned ${status}` });
-      const assets = body.assets || [];
-      arm64Id    = assets.find(a => a.name === 'agent-darwin-arm64')?.id;
-      amd64Id    = assets.find(a => a.name === 'agent-darwin-amd64')?.id;
-      checksumId = assets.find(a => a.name === 'checksums.txt')?.id;
-      if (!arm64Id || !amd64Id) return res.status(502).json({ error: 'Release assets missing from ' + TAG });
-    } catch (e) {
-      return res.status(502).json({ error: 'GitHub fetch failed: ' + e.message });
-    }
     script = buildPrivateScript(ghToken, arm64Id, amd64Id, checksumId);
   }
 

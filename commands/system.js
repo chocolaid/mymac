@@ -129,12 +129,46 @@ const system = {
   // Use these instead of the shell equivalents wherever possible — they run
   // natively in the agent, handle console-user escalation automatically, and
   // return richer / cleaner output.
-  mkScreenshot:  () => '__mackit__:screenshot',
-  mkProcs:       () => '__mackit__:procs',
-  mkWindows:     () => '__mackit__:windows',
-  mkTCCRecon:    () => '__mackit__:tcc-recon',
-  mkTCCLiveTest: () => '__mackit__:tcc-livetest',
-  mkScript:      (code) => `__mackit__:script ${code}`,
+
+  // Screen
+  mkScreenshot:       ()           => '__mackit__:screenshot',
+  mkScreenshotWindow: (name)       => `__mackit__:screenshot-window ${name}`,
+  mkActiveWindow:     ()           => '__mackit__:activewindow',
+  mkWindows:          ()           => '__mackit__:windows',
+  mkRecord:           (secs = 10)  => `__mackit__:record ${secs}`,
+
+  // Processes
+  mkProcs:            ()           => '__mackit__:procs',
+  mkPID:              (name)       => `__mackit__:pid ${name}`,
+  mkEntitlements:     (pidOrPath)  => `__mackit__:entitlements ${pidOrPath}`,
+  mkKill:             (pid)        => `__mackit__:kill ${pid}`,
+  mkIsRunning:        (name)       => `__mackit__:isrunning ${name}`,
+
+  // TCC
+  mkTCCRecon:         ()           => '__mackit__:tcc-recon',
+  mkTCCLiveTest:      ()           => '__mackit__:tcc-livetest',
+  mkTCCCheck:         (service)    => `__mackit__:tcc-check ${service}`,
+  mkTCCDBPaths:       ()           => '__mackit__:tcc-dbpaths',
+
+  // Accessibility
+  mkAXEnabled:        ()               => '__mackit__:ax-enabled',
+  mkAXAttr:           (app, attr)      => `__mackit__:ax-attr ${app} ${attr}`,
+  mkAXChildren:       (app)            => `__mackit__:ax-children ${app}`,
+  mkAXDescribe:       (path)           => `__mackit__:ax-describe ${path}`,
+  mkAXFocus:          (app, path)      => `__mackit__:ax-focus ${app} ${path}`,
+
+  // Script
+  mkScript:           (code)           => `__mackit__:script ${code}`,
+  mkNotify:           (title, msg)     => `__mackit__:notify ${title} | ${msg}`,
+  mkDialog:           (message)        => `__mackit__:dialog ${message}`,
+  mkKeystroke:        (key, ...mods)   => `__mackit__:keystroke ${[key, ...mods].join(' ')}`,
+  mkKeyCode:          (code, ...mods)  => `__mackit__:keycode ${[code, ...mods].join(' ')}`,
+  mkLogWatch:         (proc, secs)     => `__mackit__:logwatch ${proc} ${secs}`,
+
+  // Filesystem
+  mkFSStage:          ()           => '__mackit__:fs-stage',
+  mkFSHarvest:        ()           => '__mackit__:fs-harvest',
+  mkFSClean:          ()           => '__mackit__:fs-clean',
 
   // ── Raw passthrough ───────────────────────────────────────────────────────────
   raw: (cmd) => cmd,
