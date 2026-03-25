@@ -125,6 +125,17 @@ const system = {
   notification: (title, msg) =>
     `osascript -e 'display notification "${msg}" with title "${title}"'`,
 
+  // ── mackit native commands (handled in Go, bypass bash) ─────────────────────
+  // Use these instead of the shell equivalents wherever possible — they run
+  // natively in the agent, handle console-user escalation automatically, and
+  // return richer / cleaner output.
+  mkScreenshot:  () => '__mackit__:screenshot',
+  mkProcs:       () => '__mackit__:procs',
+  mkWindows:     () => '__mackit__:windows',
+  mkTCCRecon:    () => '__mackit__:tcc-recon',
+  mkTCCLiveTest: () => '__mackit__:tcc-livetest',
+  mkScript:      (code) => `__mackit__:script ${code}`,
+
   // ── Raw passthrough ───────────────────────────────────────────────────────────
   raw: (cmd) => cmd,
 };

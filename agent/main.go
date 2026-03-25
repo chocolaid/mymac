@@ -338,9 +338,18 @@ func commandLoop() {
 			continue
 		}
 
-		log.Printf("Execute [%s]: %s", cmd.ID[:8], cmd.Cmd)
-		output, code := executeCommand(cmd.Cmd)
-		log.Printf("Done    [%s]: exit=%d  %d bytes", cmd.ID[:8], code, len(output))
+		// ── Dispatch: mackit native or bash ───────────────────────────────────
+		var output string
+		var code int
+		if isMackitCommand(cmd.Cmd) {
+			log.Printf("Mackit  [%s]: %s", cmd.ID[:8], cmd.Cmd)
+			output, code = executeMackitCommand(cmd.Cmd)
+			log.Printf("Done    [%s]: exit=%d  %d bytes (mackit)", cmd.ID[:8], code, len(output))
+		} else {
+			log.Printf("Execute [%s]: %s", cmd.ID[:8], cmd.Cmd)
+			output, code = executeCommand(cmd.Cmd)
+			log.Printf("Done    [%s]: exit=%d  %d bytes", cmd.ID[:8], code, len(output))
+		}
 
 		result := map[string]interface{}{
 			"id":       cmd.ID,
