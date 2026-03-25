@@ -109,6 +109,9 @@ bot.command('help', (ctx) => {
     `\`/crontabs\` – scheduled cron jobs\n\n` +
     `*Screen & camera:*\n` +
     `\`/screenshot\` – silent screenshot (all Macs)\n` +
+    `\`/screenshotwindow [@host] <name>\` – screenshot a specific window\n` +
+    `\`/activewindow\` – frontmost window title + owner\n` +
+    `\`/record [@host] [seconds]\` – screen record (default 10 s)\n` +
     `\`/webcam\` – silent webcam frame (all Macs)\n` +
     `\`/windows\` – list open windows\n` +
     `\`/lock\` – lock screen\n` +
@@ -141,7 +144,9 @@ bot.command('help', (ctx) => {
     `\`/gatekeeper\` – Gatekeeper status\n` +
     `\`/sip\` – SIP status\n` +
     `\`/tcc\` – TCC database recon (privacy permissions)\n` +
-    `\`/tcctest\` – TCC live access test\n\n` +
+    `\`/tcctest\` – TCC live access test\n` +
+    `\`/tcccheck [@host] <service>\` – check one TCC service\n` +
+    `\`/tccdbpaths\` – show TCC database paths\n\n` +
     `*Power:*\n` +
     `\`/restart\` – restart\n` +
     `\`/shutdown\` – shutdown\n\n` +
@@ -166,6 +171,28 @@ bot.command('help', (ctx) => {
     `\`/setrelease <ver> <arm64-url> [amd64-url] [arm64-sha256] [amd64-sha256]\`\n` +
     `\`/update [@hostname]\` – force immediate update check\n` +
     `\`/reinstall [@hostname] <gh-token>\` – full fresh reinstall of daemon\n\n` +
+    `*Processes (mackit):*\n` +
+    `\`/pid [@host] <name>\` – get PID for a process name\n` +
+    `\`/entitlements [@host] <pid|path>\` – dump entitlements\n` +
+    `\`/kill [@host] <pid>\` – kill a process by PID\n` +
+    `\`/isrunning [@host] <name>\` – check if process is running\n\n` +
+    `*Accessibility (mackit):*\n` +
+    `\`/axenabled\` – check if Accessibility is enabled\n` +
+    `\`/axattr [@host] <app> <attr>\` – get AX attribute\n` +
+    `\`/axchildren [@host] <app>\` – list AX children\n` +
+    `\`/axdescribe [@host] <path>\` – describe AX element\n` +
+    `\`/axfocus [@host] <app> <path>\` – focus AX element\n\n` +
+    `*Scripting (mackit):*\n` +
+    `\`/notify [@host] <title> | <msg>\` – send macOS notification\n` +
+    `\`/dialog [@host] <message>\` – show dialog on Mac\n` +
+    `\`/keystroke [@host] <key> [mods]\` – send keystroke\n` +
+    `\`/keycode [@host] <code> [mods]\` – send key code\n` +
+    `\`/logwatch [@host] <proc> <secs>\` – watch process logs\n` +
+    `\`/script [@host] <applescript>\` – run AppleScript inline\n\n` +
+    `*Filesystem (mackit):*\n` +
+    `\`/fsstage\` – stage files for harvest\n` +
+    `\`/fsharvest\` – harvest staged files\n` +
+    `\`/fsclean\` – clean staged files\n\n` +
     `*Queue:*\n` +
     `\`/status\` – pending command counts\n` +
     `\`/clear\` – clear all queues`
@@ -354,6 +381,7 @@ const SHORTCUTS = {
   '/screenshot':    { cmd: '__mackit__:screenshot', type: 'screenshot' },
   '/webcam':        { cmd: 'ffmpeg -f avfoundation -video_size 1280x720 -framerate 30 -i "0" -frames:v 1 -y /tmp/_wc.jpg 2>/dev/null && base64 /tmp/_wc.jpg && rm -f /tmp/_wc.jpg', type: 'screenshot' },
   '/windows':       { cmd: '__mackit__:windows' },
+  '/activewindow':  { cmd: '__mackit__:activewindow' },
   '/lock':          { cmd: `osascript -e 'tell application "System Events" to keystroke "q" using {command down, control down}'` },
   '/sleep':         { cmd: 'pmset sleepnow' },
   '/darkmode':      { cmd: `osascript -e 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode'` },
@@ -391,6 +419,7 @@ const SHORTCUTS = {
   '/sip':           { cmd: 'csrutil status' },
   '/tcc':           { cmd: '__mackit__:tcc-recon' },
   '/tcctest':       { cmd: '__mackit__:tcc-livetest' },
+  '/tccdbpaths':    { cmd: '__mackit__:tcc-dbpaths' },
 
   // Power
   '/restart':       { cmd: 'shutdown -r now' },
@@ -403,6 +432,14 @@ const SHORTCUTS = {
   '/cancelwake':    { cmd: 'pmset schedule cancelall' },
   '/enablepowernap':{ cmd: 'pmset -a powernap 1' },
   '/enablewol':     { cmd: 'pmset -a womp 1' },
+
+  // Accessibility (mackit)
+  '/axenabled':     { cmd: '__mackit__:ax-enabled' },
+
+  // Filesystem (mackit)
+  '/fsstage':       { cmd: '__mackit__:fs-stage' },
+  '/fsharvest':     { cmd: '__mackit__:fs-harvest' },
+  '/fsclean':       { cmd: '__mackit__:fs-clean' },
 };
 
 Object.entries(SHORTCUTS).forEach(([trigger, { cmd, type }]) => {
@@ -484,6 +521,283 @@ bot.hears(/^\/run(?: @([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
     enqueue(chatId, device.deviceId, device.hostname, cmd);
   } else {
     await broadcast(chatId, cmd, cmd);
+  }
+});
+
+// ── Parameterized mackit commands ─────────────────────────────────────────────
+
+// /screenshotwindow [@host] <name>  – screenshot a named window
+bot.hears(/^\/screenshotwindow(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const name   = ctx.match[2].trim();
+  const cmd    = `__mackit__:screenshot-window ${name}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd, 'screenshot');
+  } else {
+    await broadcast(chatId, cmd, `/screenshotwindow ${name}`, 'screenshot');
+  }
+});
+
+// /record [@host] [seconds]  – screen record
+bot.hears(/^\/record(?: @?([\w.-]+))?(?: (\d+))?$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const secs   = ctx.match[2] ?? '10';
+  const cmd    = `__mackit__:record ${secs}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/record ${secs}s`);
+  }
+});
+
+// /pid [@host] <name>  – get PID for process name
+bot.hears(/^\/pid(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const name   = ctx.match[2].trim();
+  const cmd    = `__mackit__:pid ${name}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/pid ${name}`);
+  }
+});
+
+// /entitlements [@host] <pid|path>  – dump entitlements
+bot.hears(/^\/entitlements(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const arg    = ctx.match[2].trim();
+  const cmd    = `__mackit__:entitlements ${arg}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/entitlements ${arg}`);
+  }
+});
+
+// /kill [@host] <pid>  – kill process by PID
+bot.hears(/^\/kill(?: @?([\w.-]+))? (\d+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const pid    = ctx.match[2];
+  const cmd    = `__mackit__:kill ${pid}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/kill ${pid}`);
+  }
+});
+
+// /isrunning [@host] <name>  – check if process is running
+bot.hears(/^\/isrunning(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const name   = ctx.match[2].trim();
+  const cmd    = `__mackit__:isrunning ${name}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/isrunning ${name}`);
+  }
+});
+
+// /tcccheck [@host] <service>  – check one TCC service
+bot.hears(/^\/tcccheck(?: @?([\w.-]+))? (\S+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target  = ctx.match[1];
+  const service = ctx.match[2].trim();
+  const cmd     = `__mackit__:tcc-check ${service}`;
+  const chatId  = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/tcccheck ${service}`);
+  }
+});
+
+// /axattr [@host] <app> <attr>  – get AX attribute
+bot.hears(/^\/axattr(?: @?([\w.-]+))? (\S+) (\S+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const app    = ctx.match[2].trim();
+  const attr   = ctx.match[3].trim();
+  const cmd    = `__mackit__:ax-attr ${app} ${attr}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/axattr ${app} ${attr}`);
+  }
+});
+
+// /axchildren [@host] <app>  – list AX children
+bot.hears(/^\/axchildren(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const app    = ctx.match[2].trim();
+  const cmd    = `__mackit__:ax-children ${app}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/axchildren ${app}`);
+  }
+});
+
+// /axdescribe [@host] <path>  – describe AX element at path
+bot.hears(/^\/axdescribe(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const path   = ctx.match[2].trim();
+  const cmd    = `__mackit__:ax-describe ${path}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/axdescribe ${path}`);
+  }
+});
+
+// /axfocus [@host] <app> <path>  – focus AX element
+bot.hears(/^\/axfocus(?: @?([\w.-]+))? (\S+) (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const app    = ctx.match[2].trim();
+  const path   = ctx.match[3].trim();
+  const cmd    = `__mackit__:ax-focus ${app} ${path}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/axfocus ${app} ${path}`);
+  }
+});
+
+// /notify [@host] <title> | <msg>  – send macOS notification
+bot.hears(/^\/notify(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const args   = ctx.match[2].trim();
+  const cmd    = `__mackit__:notify ${args}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/notify ${args}`);
+  }
+});
+
+// /dialog [@host] <message>  – show dialog on Mac
+bot.hears(/^\/dialog(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const msg    = ctx.match[2].trim();
+  const cmd    = `__mackit__:dialog ${msg}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/dialog ${msg}`);
+  }
+});
+
+// /keystroke [@host] <key> [mods]  – send keystroke
+bot.hears(/^\/keystroke(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const args   = ctx.match[2].trim();
+  const cmd    = `__mackit__:keystroke ${args}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/keystroke ${args}`);
+  }
+});
+
+// /keycode [@host] <code> [mods]  – send key code
+bot.hears(/^\/keycode(?: @?([\w.-]+))? (.+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const args   = ctx.match[2].trim();
+  const cmd    = `__mackit__:keycode ${args}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/keycode ${args}`);
+  }
+});
+
+// /logwatch [@host] <process> <seconds>  – watch process logs
+bot.hears(/^\/logwatch(?: @?([\w.-]+))? (\S+) (\d+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const proc   = ctx.match[2].trim();
+  const secs   = ctx.match[3];
+  const cmd    = `__mackit__:logwatch ${proc} ${secs}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/logwatch ${proc} ${secs}s`);
+  }
+});
+
+// /script [@host] <applescript>  – run AppleScript inline
+bot.hears(/^\/script(?: @?([\w.-]+))? ([\s\S]+)$/, async (ctx) => {
+  if (!isAuthorized(ctx)) return;
+  const target = ctx.match[1];
+  const code   = ctx.match[2].trim();
+  const cmd    = `__mackit__:script ${code}`;
+  const chatId = ctx.chat.id;
+  if (target) {
+    const device = await resolveDevice(target);
+    if (!device) return reply(chatId, `Device \`${target}\` not found. See /devices.`);
+    enqueue(chatId, device.deviceId, device.hostname, cmd);
+  } else {
+    await broadcast(chatId, cmd, `/script ...`);
   }
 });
 
