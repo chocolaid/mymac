@@ -34,16 +34,14 @@ ERR_PATH="/var/log/${AGENT_LABEL}.err"
 # ── Map arch to binary suffix ────────────────────────────────────────────────
 [[ "$ARCH" == "arm64" ]] && BINARY_SUFFIX="arm64" || BINARY_SUFFIX="amd64"
 
-# GitHub release base URL (private repo — token required)
-GH_RELEASE_BASE="https://github.com/chocolaid/mymac/releases/download/v2.0.2"
-BINARY_URL="${GH_RELEASE_BASE}/agent-darwin-${BINARY_SUFFIX}"
-CHECKSUM_URL="${GH_RELEASE_BASE}/checksums.txt"
+# GitHub repo (private — token required)
+GH_REPO="chocolaid/mymac"
 
 echo -e "\n${BOLD}╔══════════════════════════════════════════╗"
 echo -e "║       mymac agent – installer v2         ║"
 echo -e "╚══════════════════════════════════════════╝${RESET}\n"
 echo -e "  Architecture: ${CYAN}${ARCH}${RESET} → binary: ${CYAN}agent-darwin-${BINARY_SUFFIX}${RESET}"
-echo -e "  Download URL: ${CYAN}${BINARY_URL}${RESET}\n"
+echo -e "  Repository:   ${CYAN}${GH_REPO}${RESET} (latest release)\n"
 
 # GitHub personal access token (required — repo is private)
 # Accept from env (non-interactive/bot reinstall) or prompt interactively.
@@ -54,7 +52,23 @@ fi
 
 echo ""
 
-# ── Download binary ───────────────────────────────────────────────────────────
+# ── Resolve latest release URL from GitHub API ───────────────────────────────
+info "Resolving latest release from GitHub..."
+RELEASE_JSON="$(curl -fsSL --retry 3 \
+  -H "Authorization: token ${GH_TOKEN}" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/${GH_REPO}/releases/latest")" \
+  || die "Could not reach GitHub API. Check your token and network."
+
+LATEST_TAG="$(echo "$RELEASE_JSON" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)"
+[[ -n "$LATEST_TAG" ]] || die "No releases found for ${GH_REPO}. Run build.sh first."
+
+GH_RELEASE_BASE="https://github.com/${GH_REPO}/releases/download/${LATEST_TAG}"
+BINARY_URL="${GH_RELEASE_BASE}/agent-darwin-${BINARY_SUFFIX}"
+CHECKSUM_URL="${GH_RELEASE_BASE}/checksums.txt"
+info "Latest release: ${LATEST_TAG}"
+
+echo ""
 info "Downloading agent binary (agent-darwin-${BINARY_SUFFIX})..."
 
 TMPBIN="$(mktemp)"

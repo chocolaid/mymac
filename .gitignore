@@ -1,5 +1,6 @@
 bot/.env
 bot/node_modules/
+agent/go.work.sum
 config-server/.env.local
 config-server/node_modules/
 config-server/.next/
