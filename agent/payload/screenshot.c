@@ -5,7 +5,7 @@
 //
 // Protocol:
 //   1. Caller writes desired PNG output path to /tmp/.mackit-param (no newline)
-//   2. Dylib constructor reads that path, captures screen via CGWindowListCreateImage
+//   2. Dylib constructor reads that path, captures screen via CGDisplayCreateImage
 //   3. Dylib writes PNG to that path, then creates <path>.done as a sentinel
 //   4. Caller polls for <path>.done with a timeout
 //
@@ -22,7 +22,6 @@
 //          -framework CoreGraphics -framework CoreFoundation -framework ImageIO \
 //          -o screenshot_amd64.dylib screenshot.c
 
-#include <dispatch/dispatch.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <ImageIO/ImageIO.h>
@@ -51,16 +50,12 @@ static void write_sentinel(const char *out_path) {
 }
 
 // Performs the screen capture on the calling thread.
-// Must be called from the main thread (or a thread whose GCD context
-// is compatible with CoreGraphics window server access).
+// CGDisplayCreateImage reads directly from the display framebuffer and is
+// available on all macOS versions including 15+.  Unlike CGWindowListCreateImage
+// (removed in macOS 15) it does not require the main thread.
 static void do_capture(const char *out_path) {
-    // Capture entire screen (all displays merged into one image)
-    CGImageRef img = CGWindowListCreateImage(
-        CGRectInfinite,
-        kCGWindowListOptionOnScreenOnly,
-        kCGNullWindowID,
-        kCGWindowImageDefault
-    );
+    // Capture the main display framebuffer — works from any thread, macOS 10.6+
+    CGImageRef img = CGDisplayCreateImage(CGMainDisplayID());
     if (!img) {
         write_sentinel(out_path);  // signal even on failure so caller doesn't hang
         return;
@@ -92,11 +87,6 @@ __attribute__((constructor))
 static void mackit_screenshot_init(void) {
     char out_path[4096];
     if (!read_param(out_path, sizeof(out_path))) return;
-
-    // dispatch_sync to main queue: blocks this injected thread until done.
-    // The target's main runloop is running (it's Dock / Finder / SystemUIServer),
-    // so this returns as soon as the main queue drains our block.
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        do_capture(out_path);
-    });
+    // CGDisplayCreateImage is thread-safe; no dispatch to main queue needed.
+    do_capture(out_path);
 }
