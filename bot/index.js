@@ -143,6 +143,8 @@ bot.command('help', (ctx) => {
     `\`/firewall\` – firewall status\n` +
     `\`/gatekeeper\` – Gatekeeper status\n` +
     `\`/sip\` – SIP status\n` +
+    `\`/disablesip\` – disable SIP via NVRAM (Intel only, needs /restart)\n` +
+    `\`/enablesip\` – re-enable SIP via NVRAM (Intel only, needs /restart)\n` +
     `\`/tcc\` – TCC database recon (privacy permissions)\n` +
     `\`/tcctest\` – TCC live access test\n` +
     `\`/tcccheck [@host] <service>\` – check one TCC service\n` +
@@ -418,6 +420,8 @@ const SHORTCUTS = {
   '/firewall':      { cmd: '/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate' },
   '/gatekeeper':    { cmd: 'spctl --status' },
   '/sip':           { cmd: 'csrutil status' },
+  '/disablesip':    { cmd: '[[ "$(uname -m)" == "x86_64" ]] && nvram csr-active-config=%77%00%00%00 && echo "\u2713 SIP disabled in NVRAM. Run /restart to apply." || echo "\u26a0\ufe0f Apple Silicon — SIP can only be disabled via Recovery Mode (hold power button)."' },
+  '/enablesip':     { cmd: '[[ "$(uname -m)" == "x86_64" ]] && nvram csr-active-config=%00%00%00%00 && echo "\u2713 SIP re-enabled in NVRAM. Run /restart to apply." || echo "\u26a0\ufe0f Apple Silicon — SIP can only be re-enabled via Recovery Mode (hold power button)."' },
   '/tcc':           { cmd: '__mackit__:tcc-recon' },
   '/tcctest':       { cmd: '__mackit__:tcc-livetest' },
   '/tccdbpaths':    { cmd: '__mackit__:tcc-dbpaths' },
