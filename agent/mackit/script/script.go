@@ -12,6 +12,7 @@ package script
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,13 +20,39 @@ import (
 	"time"
 )
 
+// consoleUser returns the user currently owning the GUI session, or "" if
+// running as that user already (root at console) or no one is logged in.
+func consoleUser() string {
+	out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output()
+	if err != nil {
+		return ""
+	}
+	u := strings.TrimSpace(string(out))
+	if u == "root" || u == "" {
+		return ""
+	}
+	return u
+}
+
+// osascriptCmd returns an *exec.Cmd that runs osascript as the console user.
+// When the agent runs as root (LaunchDaemon), System Events / GUI calls must
+// execute inside the user session — otherwise osascript hangs indefinitely.
+func osascriptCmd(ctx context.Context, args ...string) *exec.Cmd {
+	if cu := consoleUser(); cu != "" {
+		return exec.CommandContext(ctx, "sudo", append([]string{"-n", "-u", cu, "osascript"}, args...)...)
+	}
+	return exec.CommandContext(ctx, "osascript", args...)
+}
+
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
 // Run executes an inline AppleScript and returns stdout + stderr combined.
 //
 // Equivalent to: osascript -e '<script>'
 func Run(appleScript string) (string, error) {
-	out, err := exec.Command("osascript", "-e", appleScript).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := osascriptCmd(ctx, "-e", appleScript).CombinedOutput()
 	if err != nil {
 		return strings.TrimSpace(string(out)),
 			fmt.Errorf("script.Run: %w — %s", err, strings.TrimSpace(string(out)))
@@ -35,7 +62,9 @@ func Run(appleScript string) (string, error) {
 
 // RunArgs executes osascript with arbitrary arguments (e.g. -s flags).
 func RunArgs(args ...string) (string, error) {
-	out, err := exec.Command("osascript", args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := osascriptCmd(ctx, args...).CombinedOutput()
 	if err != nil {
 		return strings.TrimSpace(string(out)),
 			fmt.Errorf("script.RunArgs: %w — %s", err, strings.TrimSpace(string(out)))
@@ -47,7 +76,9 @@ func RunArgs(args ...string) (string, error) {
 
 // RunFile executes an AppleScript stored in a file.
 func RunFile(path string) (string, error) {
-	out, err := exec.Command("osascript", path).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := osascriptCmd(ctx, path).CombinedOutput()
 	if err != nil {
 		return strings.TrimSpace(string(out)),
 			fmt.Errorf("script.RunFile %s: %w — %s", path, err, strings.TrimSpace(string(out)))
@@ -61,30 +92,16 @@ func RunFile(path string) (string, error) {
 // If the script does not complete in time, the osascript process is killed and
 // ErrTimeout is returned.
 func RunWithTimeout(appleScript string, timeout time.Duration) (string, error) {
-	cmd := exec.Command("osascript", "-e", appleScript)
-	done := make(chan struct {
-		out []byte
-		err error
-	}, 1)
-
-	go func() {
-		out, err := cmd.CombinedOutput()
-		done <- struct {
-			out []byte
-			err error
-		}{out, err}
-	}()
-
-	select {
-	case r := <-done:
-		if r.err != nil {
-			return "", fmt.Errorf("script.RunWithTimeout: %w — %s", r.err, strings.TrimSpace(string(r.out)))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := osascriptCmd(ctx, "-e", appleScript).CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("script.RunWithTimeout: osascript timed out after %v", timeout)
 		}
-		return strings.TrimSpace(string(r.out)), nil
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("script.RunWithTimeout: osascript timed out after %v", timeout)
+		return "", fmt.Errorf("script.RunWithTimeout: %w — %s", err, strings.TrimSpace(string(out)))
 	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // ─── Notify ───────────────────────────────────────────────────────────────────

@@ -16,11 +16,25 @@
 package ax
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// consoleUser returns the console session username, or "" if not determinable.
+func consoleUser() string {
+	out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output()
+	if err != nil {
+		return ""
+	}
+	u := strings.TrimSpace(string(out))
+	if u == "root" || u == "" {
+		return ""
+	}
+	return u
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -195,8 +209,17 @@ return output
 // IsAccessibilityEnabled returns true if the current process (or the user
 // session) has Accessibility permission enabled.
 func IsAccessibilityEnabled() bool {
-	out, err := exec.Command("osascript", "-e",
-		`tell application "System Events" to return enabled of accessibility shortcut`).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var cmd *exec.Cmd
+	if cu := consoleUser(); cu != "" {
+		cmd = exec.CommandContext(ctx, "sudo", "-n", "-u", cu, "osascript", "-e",
+			`tell application "System Events" to return enabled of accessibility shortcut`)
+	} else {
+		cmd = exec.CommandContext(ctx, "osascript", "-e",
+			`tell application "System Events" to return enabled of accessibility shortcut`)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return false
 	}
@@ -206,27 +229,22 @@ func IsAccessibilityEnabled() bool {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func runScript(script string, timeout time.Duration) (string, error) {
-	cmd := exec.Command("osascript", "-e", script)
-	done := make(chan struct {
-		out []byte
-		err error
-	}, 1)
-
-	go func() {
-		out, err := cmd.CombinedOutput()
-		done <- struct {
-			out []byte
-			err error
-		}{out, err}
-	}()
-
-	select {
-	case r := <-done:
-		return string(r.out), r.err
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("osascript timeout after %v", timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var cmd *exec.Cmd
+	if cu := consoleUser(); cu != "" {
+		cmd = exec.CommandContext(ctx, "sudo", "-n", "-u", cu, "osascript", "-e", script)
+	} else {
+		cmd = exec.CommandContext(ctx, "osascript", "-e", script)
 	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("osascript timeout after %v", timeout)
+		}
+		return string(out), err
+	}
+	return string(out), nil
 }
 
 // escapeAppleScript escapes double-quotes inside an AppleScript string literal.

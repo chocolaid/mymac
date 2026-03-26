@@ -18,6 +18,39 @@ import (
 	"strings"
 )
 
+// consoleUserHome returns the home directory of the currently logged-in GUI user.
+// When the agent runs as root this avoids using /var/root, which lacks the usual
+// TCC-protected folders (Desktop, Documents, Downloads, etc.).
+func consoleUserHome() string {
+	// Get the console user's login name
+	out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" || strings.TrimSpace(string(out)) == "root" {
+		// Fallback: try to find a real user home under /Users
+		entries, err2 := os.ReadDir("/Users")
+		if err2 == nil {
+			for _, e := range entries {
+				if e.IsDir() && e.Name() != "Shared" && !strings.HasPrefix(e.Name(), ".") {
+					return "/Users/" + e.Name()
+				}
+			}
+		}
+		home, _ := os.UserHomeDir()
+		return home
+	}
+	user := strings.TrimSpace(string(out))
+	// Look up the home directory via dscl
+	homeOut, err := exec.Command("dscl", ".", "-read", "/Users/"+user, "NFSHomeDirectory").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(homeOut), "\n") {
+			if strings.HasPrefix(line, "NFSHomeDirectory:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "NFSHomeDirectory:"))
+			}
+		}
+	}
+	// Most Macs: home is /Users/<username>
+	return "/Users/" + user
+}
+
 // ─── Service constants ────────────────────────────────────────────────────────
 
 // Service identifies a TCC privacy service.
@@ -100,7 +133,7 @@ type Grant struct {
 // the well-known services listed in ServiceName.
 // Returns an error if sqlite3 is unavailable or SIP blocks TCC.db access.
 func Recon() ([]Grant, error) {
-	home, _ := os.UserHomeDir()
+	home := consoleUserHome()
 	db := filepath.Join(home, "Library/Application Support/com.apple.TCC/TCC.db")
 
 	if _, err := exec.LookPath("sqlite3"); err != nil {
@@ -175,7 +208,7 @@ type LiveTestResult struct {
 // and reports whether the OS permits access.  This is the most reliable way
 // to confirm TCC enforcement without requiring sqlite3 access.
 func LiveTest() []LiveTestResult {
-	home, _ := os.UserHomeDir()
+	home := consoleUserHome()
 
 	targets := map[Service]string{
 		Desktop:   filepath.Join(home, "Desktop"),
@@ -205,7 +238,7 @@ func LiveTest() []LiveTestResult {
 
 // DBPaths returns the paths to both the per-user and system-wide TCC databases.
 func DBPaths() (user, system string) {
-	home, _ := os.UserHomeDir()
+	home := consoleUserHome()
 	user = filepath.Join(home, "Library/Application Support/com.apple.TCC/TCC.db")
 	system = "/Library/Application Support/com.apple.TCC/TCC.db"
 	return

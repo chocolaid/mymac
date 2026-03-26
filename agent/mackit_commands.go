@@ -54,6 +54,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -67,6 +68,28 @@ import (
 	"mackit/script"
 	"mackit/tcc"
 )
+
+// consoleUserHome returns the home directory of the currently logged-in GUI user.
+// Needed because the agent runs as root (/var/root) which lacks normal user dirs.
+func consoleUserHome() string {
+	out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output()
+	if err == nil {
+		user := strings.TrimSpace(string(out))
+		if user != "" && user != "root" {
+			return "/Users/" + user
+		}
+	}
+	// Fallback: first real entry under /Users
+	if entries, err2 := os.ReadDir("/Users"); err2 == nil {
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "Shared" && !strings.HasPrefix(e.Name(), ".") {
+				return "/Users/" + e.Name()
+			}
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
 
 const mackitPrefix = "__mackit__:"
 
@@ -569,7 +592,7 @@ var (
 )
 
 func mackitFSStage() (string, int) {
-	home, _ := os.UserHomeDir()
+	home := consoleUserHome()
 	targets := fs.StandardTargets(home)
 
 	stageDir, err := fs.CreateSymlinkStage("mackit", targets)

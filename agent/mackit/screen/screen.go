@@ -13,6 +13,7 @@
 package screen
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -168,8 +169,8 @@ func captureScreencapture(opts Options) (*Result, error) {
 		if err != nil {
 			return nil, fmt.Errorf("screencapture: resolve console user: %w", err)
 		}
-		// sudo -u <user> /usr/sbin/screencapture <args...>
-		sudoArgs := append([]string{"-u", cu, "/usr/sbin/screencapture"}, args...)
+		// sudo -n -u <user> /usr/sbin/screencapture <args...>
+		sudoArgs := append([]string{"-n", "-u", cu, "/usr/sbin/screencapture"}, args...)
 		cmd = exec.Command("sudo", sudoArgs...)
 	} else {
 		cmd = exec.Command("/usr/sbin/screencapture", args...)
@@ -322,7 +323,7 @@ tell application "System Events"
 end tell
 return output
 `
-	out, err := exec.Command("osascript", "-e", script).Output()
+	out, err := runOsascriptAsUser(script, 20*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("WindowList osascript: %w", err)
 	}
@@ -357,7 +358,7 @@ tell application "System Events"
     return winID & "|" & frontName & "|" & frontWin
 end tell
 `
-	out, err := exec.Command("osascript", "-e", script).Output()
+	out, err := runOsascriptAsUser(script, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("ActiveWindow osascript: %w", err)
 	}
@@ -405,6 +406,23 @@ func resultFromPath(path string, t Technique) (*Result, error) {
 		Size:       fi.Size(),
 		CapturedAt: time.Now(),
 	}, nil
+}
+
+// runOsascriptAsUser runs an AppleScript as the console user with a timeout.
+// When the agent runs as root (LaunchDaemon), osascript must be executed in
+// the user's GUI session — otherwise System Events calls hang indefinitely.
+func runOsascriptAsUser(script string, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cu, err := consoleUser()
+	if err != nil || cu == "" {
+		// No console user or running as root directly — call osascript without sudo.
+		cmd := exec.CommandContext(ctx, "osascript", "-e", script)
+		return cmd.Output()
+	}
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "-u", cu, "osascript", "-e", script)
+	return cmd.Output()
 }
 
 // consoleUser returns the username of the user currently logged in at the
