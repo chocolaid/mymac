@@ -335,6 +335,53 @@ func Provision(binaryPath string) []ProvisionResult {
 	return results
 }
 
+// RevokeGrant deletes the TCC row for (service, client) from dbPath.
+// Use this to remove a previously written grant or to clean up after a PoC.
+// Must be called as root; requires sqlite3 in PATH.
+func RevokeGrant(dbPath string, svc Service, client string) error {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		return fmt.Errorf("sqlite3 not found: %w", err)
+	}
+	q := fmt.Sprintf(
+		`DELETE FROM access WHERE service='%s' AND client='%s';`,
+		string(svc), client,
+	)
+	out, err := exec.Command("sqlite3", dbPath, q).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3: %w — %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// RevokeAll removes every TCC row for the given client path from dbPath.
+// Useful for cleaning up all provisioned grants in a single call.
+func RevokeAll(dbPath, client string) error {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		return fmt.Errorf("sqlite3 not found: %w", err)
+	}
+	q := fmt.Sprintf(`DELETE FROM access WHERE client='%s';`, client)
+	out, err := exec.Command("sqlite3", dbPath, q).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3: %w — %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// GrantSelf writes AuthAllowed for svc to the user TCC.db for the current
+// binary's path.  Convenience wrapper over WriteGrant for PoC installations.
+func GrantSelf(svc Service) error {
+	userDB := filepath.Join(consoleUserHome(),
+		"Library/Application Support/com.apple.TCC/TCC.db")
+	return WriteGrant(userDB, svc, selfBundleID())
+}
+
+// GrantSelfSystem writes AuthAllowed for svc to the system TCC.db.
+// Requires SIP to be disabled (system TCC.db is SIP-protected) and root.
+func GrantSelfSystem(svc Service) error {
+	systemDB := "/Library/Application Support/com.apple.TCC/TCC.db"
+	return WriteGrant(systemDB, svc, selfBundleID())
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func selfBundleID() string {

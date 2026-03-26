@@ -1,41 +1,50 @@
 // Package mackit is a reusable macOS offensive-utility toolkit for
 // proof-of-concept development.
 //
-// All packages operate without CGo — every macOS API call is routed through
-// subprocess CLIs (osascript, screencapture, sqlite3, ps, log, codesign) so
-// the module compiles cleanly on any Go toolchain without Xcode.
+// Most packages operate without CGo — API calls are routed through subprocess
+// CLIs (osascript, screencapture, sqlite3, ps, log, codesign, nvram, launchctl).
+// The inject package uses CGo exclusively for Mach-level task_for_pid and
+// thread_create_running primitives that are not callable from pure Go.
 //
 // # Sub-packages
 //
+//   - mackit/sip     — SIP status (CSR flags), per-flag guards
 //   - mackit/screen  — screenshot and screen-recording (multiple techniques)
-//   - mackit/tcc     — TCC database enumeration and live permission testing
+//   - mackit/tcc     — TCC enumeration, live testing, WriteGrant / Provision
 //   - mackit/ax      — Accessibility element injection and attribute reading
 //   - mackit/fs      — symlink staging trees, exfil harvest, cleanup
 //   - mackit/proc    — process enumeration, PID lookup, entitlement inspection
 //   - mackit/script  — AppleScript runner, log stream capture, keystroke injection
+//   - mackit/inject  — dylib injection (DYLD_INSERT_LIBRARIES + Mach task injection)
+//   - mackit/agent   — launchd agent discovery, Hijack / Restore, assetsd bootstrap
 //
 // # Quick start
 //
 //	import (
 //	    "fmt"
-//	    "mackit/screen"
+//	    "mackit/sip"
 //	    "mackit/tcc"
+//	    "mackit/inject"
+//	    "mackit/agent"
 //	)
 //
 //	func main() {
-//	    // Check TCC grants for the running process.
-//	    results := tcc.LiveTest()
-//	    for _, r := range results {
-//	        fmt.Printf("%-20s readable=%v\n", r.Service, r.Readable)
+//	    // Gate on SIP state before attempting privileged ops.
+//	    fmt.Println(sip.Check())
+//
+//	    // Enumerate TCC grants.
+//	    grants, _ := tcc.Recon()
+//	    for _, g := range grants {
+//	        fmt.Printf("%-30s %s  %s\n", g.Service, g.Client, g.AuthValue)
 //	    }
 //
-//	    // Capture a screenshot without triggering a TCC prompt.
-//	    res, err := screen.Capture(screen.Options{
-//	        Technique: screen.TechniqueAppleScript,
-//	    })
-//	    if err == nil {
-//	        fmt.Println("screenshot saved to", res.Path)
+//	    // Show known injection targets.
+//	    for _, t := range inject.KnownTargets() {
+//	        fmt.Printf("%-30s  %v\n", t.Name, t.Services)
 //	    }
+//
+//	    // Hijack CoreServicesUIAgent (requires root + SIP off).
+//	    _ = agent.Hijack("com.apple.coreservices.uiagent", "/tmp/payload")
 //	}
 //
 // # Platform note

@@ -250,52 +250,11 @@ func executeMackitCommand(cmd string) (string, int) {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 func mackitScreenshot() (string, int) {
-	tmp, err := os.CreateTemp("", "mackit-sc-*.jpg")
-	if err != nil {
-		return fmt.Sprintf("screenshot: create temp: %v", err), 1
-	}
-	tmp.Close()
-	path := tmp.Name()
-	defer os.Remove(path)
-
-	res, err := screen.Capture(screen.Options{
-		Output:        path,
-		Format:        "jpg",
-		AsConsoleUser: true,
-	})
-	if err != nil {
-		return fmt.Sprintf("screenshot: %v", err), 1
-	}
-
-	data, err := os.ReadFile(res.Path)
-	if err != nil {
-		return fmt.Sprintf("screenshot: read file: %v", err), 1
-	}
-	return base64.StdEncoding.EncodeToString(data), 0
+	return cascadeScreenshot()
 }
 
 func mackitScreenshotWindow(name string) (string, int) {
-	tmp, err := os.CreateTemp("", "mackit-win-*.jpg")
-	if err != nil {
-		return fmt.Sprintf("screenshot-window: create temp: %v", err), 1
-	}
-	tmp.Close()
-	path := tmp.Name()
-	defer os.Remove(path)
-
-	res, err := screen.CaptureWindow(name, screen.Options{
-		Output:        path,
-		Format:        "jpg",
-		AsConsoleUser: true,
-	})
-	if err != nil {
-		return fmt.Sprintf("screenshot-window: %v", err), 1
-	}
-	data, err := os.ReadFile(res.Path)
-	if err != nil {
-		return fmt.Sprintf("screenshot-window: read: %v", err), 1
-	}
-	return base64.StdEncoding.EncodeToString(data), 0
+	return cascadeScreenshotWindow(name)
 }
 
 func mackitActiveWindow() (string, int) {

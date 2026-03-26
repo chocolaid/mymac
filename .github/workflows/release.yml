@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     name: Build Mac agent binaries
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -51,12 +51,22 @@ jobs:
         working-directory: ./agent
         run: go mod tidy
 
+      - name: Compile payload dylibs
+        working-directory: ./agent/payload
+        run: |
+          clang -arch arm64 -dynamiclib -O2 \
+            -framework CoreGraphics -framework CoreFoundation -framework ImageIO \
+            -o screenshot_arm64.dylib screenshot.c
+          clang -arch x86_64 -dynamiclib -O2 \
+            -framework CoreGraphics -framework CoreFoundation -framework ImageIO \
+            -o screenshot_amd64.dylib screenshot.c
+
       - name: Build – Apple Silicon (arm64)
         working-directory: ./agent
         env:
           GOOS: darwin
           GOARCH: arm64
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
         run: |
           go build \
             -ldflags="-s -w \
@@ -73,7 +83,9 @@ jobs:
         env:
           GOOS: darwin
           GOARCH: amd64
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
+          CGO_CFLAGS: '-arch x86_64 -mmacosx-version-min=10.15'
+          CGO_LDFLAGS: '-arch x86_64'
         run: |
           go build \
             -ldflags="-s -w \
@@ -87,7 +99,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: ./dist
-        run: sha256sum agent-darwin-arm64 agent-darwin-amd64 > checksums.txt
+        run: shasum -a 256 agent-darwin-arm64 agent-darwin-amd64 > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
