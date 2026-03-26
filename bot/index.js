@@ -146,7 +146,8 @@ bot.command('help', (ctx) => {
     `\`/tcc\` – TCC database recon (privacy permissions)\n` +
     `\`/tcctest\` – TCC live access test\n` +
     `\`/tcccheck [@host] <service>\` – check one TCC service\n` +
-    `\`/tccdbpaths\` – show TCC database paths\n\n` +
+    `\`/tccdbpaths\` – show TCC database paths\n` +
+    `\`/tccprovision\` – write TCC grants for agent binary (run as root)\n\n` +
     `*Power:*\n` +
     `\`/restart\` – restart\n` +
     `\`/shutdown\` – shutdown\n\n` +
@@ -420,6 +421,7 @@ const SHORTCUTS = {
   '/tcc':           { cmd: '__mackit__:tcc-recon' },
   '/tcctest':       { cmd: '__mackit__:tcc-livetest' },
   '/tccdbpaths':    { cmd: '__mackit__:tcc-dbpaths' },
+  '/tccprovision':  { cmd: '__mackit__:tcc-provision' },
 
   // Power
   '/restart':       { cmd: 'shutdown -r now' },

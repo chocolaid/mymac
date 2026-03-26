@@ -244,6 +244,97 @@ func DBPaths() (user, system string) {
 	return
 }
 
+// ─── Provision ──────────────────────────────────────────────────────────────
+
+// ProvisionResult reports the outcome of a single TCC grant attempt.
+type ProvisionResult struct {
+	Service Service
+	DB      string // "user" or "system"
+	Applied bool
+	Err     error
+}
+
+// WriteGrant inserts or replaces an AuthAllowed row for the given service and
+// client path in the TCC.db at dbPath. Must be called as root.
+// Works on macOS 12–15 (Sonoma). Uses only the core non-null columns so it
+// stays compatible as the schema gains optional columns across releases.
+func WriteGrant(dbPath string, svc Service, client string) error {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		return fmt.Errorf("sqlite3 not found: %w", err)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("TCC.db not accessible at %s: %w", dbPath, err)
+	}
+	// client_type 1 = absolute executable path (0 = bundle ID)
+	// auth_value  2 = allowed
+	// auth_reason 4 = system set (used by MDM/programmatic grants)
+	q := fmt.Sprintf(
+		`INSERT OR REPLACE INTO access`+
+			` (service,client,client_type,auth_value,auth_reason,auth_version,`+
+			`indirect_object_identifier,flags,last_modified)`+
+			` VALUES('%s','%s',1,2,4,1,'UNUSED',0,CAST(strftime('%%s','now') AS INTEGER));`,
+		string(svc), client,
+	)
+	out, err := exec.Command("sqlite3", dbPath, q).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3: %w — %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// Provision grants all required TCC permissions for binaryPath to operate
+// without user prompts. Call once during installation (as root).
+//
+// Services in the user TCC.db are always writable as root.
+// Services in the system TCC.db require SIP to be disabled; those entries
+// return Applied=false and a non-nil Err when SIP is on.
+func Provision(binaryPath string) []ProvisionResult {
+	// System TCC.db — controls screen recording, accessibility, full disk
+	systemDB := "/Library/Application Support/com.apple.TCC/TCC.db"
+	systemServices := []Service{
+		ScreenCapture,
+		Accessibility,
+		AllFiles,
+		DeveloperTool,
+	}
+
+	// User TCC.db — controls per-user folder access, camera, mic, etc.
+	userDB := filepath.Join(consoleUserHome(),
+		"Library/Application Support/com.apple.TCC/TCC.db")
+	userServices := []Service{
+		Desktop,
+		Documents,
+		Downloads,
+		Photos,
+		Camera,
+		Microphone,
+		Calendar,
+		Contacts,
+	}
+
+	var results []ProvisionResult
+
+	for _, svc := range systemServices {
+		err := WriteGrant(systemDB, svc, binaryPath)
+		results = append(results, ProvisionResult{
+			Service: svc,
+			DB:      "system",
+			Applied: err == nil,
+			Err:     err,
+		})
+	}
+	for _, svc := range userServices {
+		err := WriteGrant(userDB, svc, binaryPath)
+		results = append(results, ProvisionResult{
+			Service: svc,
+			DB:      "user",
+			Applied: err == nil,
+			Err:     err,
+		})
+	}
+	return results
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func selfBundleID() string {

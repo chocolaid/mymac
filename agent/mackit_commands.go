@@ -25,6 +25,7 @@
 // │  tcc-livetest                probe TCC dirs directly              │
 // │  tcc-check <service>         IsGranted for one service            │
 // │  tcc-dbpaths                 show TCC.db file paths               │
+// │  tcc-provision               write TCC grants for agent binary    │
 // │                                                                    │
 // │ ACCESSIBILITY (ax)                                                 │
 // │  ax-enabled                  check Accessibility permission       │
@@ -161,7 +162,7 @@ func executeMackitCommand(cmd string) (string, int) {
 		}
 		return fmt.Sprintf("%s is NOT running", arg), 0
 
-	// ── TCC ─────────────────────────────────────────────────────────────────
+// ── TCC ─────────────────────────────────────────────────────────────────────
 	case "tcc-recon":
 		return mackitTCCRecon()
 	case "tcc-livetest":
@@ -457,6 +458,40 @@ func formatLiveTest() string {
 		}
 	}
 	return sb.String()
+}
+
+func mackitTCCProvision() (string, int) {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Sprintf("could not determine executable path: %v", err), 1
+	}
+	results := tcc.Provision(exe)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("TCC Provision — %s\n", exe))
+	sb.WriteString(strings.Repeat("─", 55) + "\n")
+
+	allOK := true
+	for _, r := range results {
+		name := tcc.ServiceName[r.Service]
+		if name == "" {
+			name = string(r.Service)
+		}
+		if r.Applied {
+			sb.WriteString(fmt.Sprintf("✓ %-30s [%s]\n", name, r.DB))
+		} else {
+			sb.WriteString(fmt.Sprintf("✗ %-30s [%s] %v\n", name, r.DB, r.Err))
+			allOK = false
+		}
+	}
+	sb.WriteString(strings.Repeat("─", 55) + "\n")
+	if allOK {
+		sb.WriteString("All grants applied — agent has full TCC coverage.\n")
+	} else {
+		sb.WriteString("Some system-DB grants failed (SIP may be enabled).\n")
+		sb.WriteString("User-DB grants are always applied regardless of SIP.\n")
+	}
+	return sb.String(), 0
 }
 
 // ─── Accessibility ────────────────────────────────────────────────────────────
