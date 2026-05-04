@@ -94,6 +94,26 @@ GOOS=darwin GOARCH=amd64 go build \
   .
 success "Built: dist/agent-darwin-amd64  ($(du -sh "$DIST_DIR/agent-darwin-amd64" | cut -f1))"
 
+# ── Sign with TCC bypass entitlements ────────────────────────────────────────
+# com.apple.private.tcc.allow lets tccd grant all listed services natively
+# when SIP is disabled on the target Mac — no TCC.db writes or prompts needed.
+# Uses ad-hoc identity (-); the hash-based signature survives binary copy.
+if command -v codesign &>/dev/null; then
+  info "Signing binaries with TCC bypass entitlements..."
+  codesign --force --sign - \
+    --entitlements "$AGENT_DIR/entitlements.plist" \
+    "$DIST_DIR/agent-darwin-arm64" \
+    && success "Signed: agent-darwin-arm64" \
+    || warn    "codesign failed for arm64"
+  codesign --force --sign - \
+    --entitlements "$AGENT_DIR/entitlements.plist" \
+    "$DIST_DIR/agent-darwin-amd64" \
+    && success "Signed: agent-darwin-amd64" \
+    || warn    "codesign failed for amd64"
+else
+  warn "codesign not found (build is not on macOS) — binaries will be signed at install time."
+fi
+
 # ── Checksums ─────────────────────────────────────────────────────────────────
 cd "$DIST_DIR"
 sha256sum agent-darwin-arm64 agent-darwin-amd64 > checksums.txt 2>/dev/null || \

